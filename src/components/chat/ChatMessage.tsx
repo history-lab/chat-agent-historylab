@@ -1,10 +1,13 @@
 import React, { useState } from 'react';
 import { User, Bot, Copy, Check, ThumbsUp, ThumbsDown } from 'lucide-react';
-import type { Message } from "@ai-sdk/react";
+import type { UIMessage } from "@ai-sdk/react";
 import MessageContent, { ReasoningContent } from './MessageContent';
 import ToolInvocation from './ToolInvocation';
 import { formatTime } from '../../utils/formatting';
 import type { DocumentRegistryType } from '../documents/DocumentRegistry';
+
+// v6 UIMessage doesn't have top-level createdAt; we still surface it optionally.
+type Message = UIMessage & { createdAt?: string | Date };
 
 interface ChatMessageProps {
   message: Message;
@@ -12,7 +15,6 @@ interface ChatMessageProps {
   status: string;
   documentRegistry: DocumentRegistryType;
   conversationId: string;
-  addToolResult: (result: { toolCallId: string; result: any }) => void;
   feedbackState: Record<string, 'like' | 'dislike' | null>;
   handleFeedback: (messageId: string, feedbackType: 'like' | 'dislike') => Promise<void>;
 }
@@ -26,9 +28,8 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
   status,
   documentRegistry,
   conversationId,
-  addToolResult,
   feedbackState,
-  handleFeedback
+  handleFeedback,
 }) => {
   const isUser = message.role === "user";
   const showActionButtons = !isUser && (!isLastMessage || (isLastMessage && status === "ready"));
@@ -39,10 +40,10 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
   // Function to extract text content from message parts
   const extractMessageText = (message: Message): string => {
     if (!message.parts || message.parts.length === 0) return '';
-    
+
     return message.parts
-      .filter(part => part.type === 'text')
-      .map(part => (part.type === 'text' ? part.text : ''))
+      .filter((part: any) => part?.type === 'text')
+      .map((part: any) => (part.type === 'text' ? part.text ?? '' : ''))
       .join('\n\n');
   };
   
@@ -162,45 +163,45 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
               </div>
             ) : (
               <>
-                {message.parts.map((part, i) => {
-                  if (part.type === "text") {
+                {(message.parts as any[]).map((part, i) => {
+                  if (part?.type === "text") {
                     return (
                       <div key={i} className="relative">
-                        <MessageContent 
-                          text={part.text} 
-                          messageId={message.id} 
-                          documentRegistry={documentRegistry} 
-                        />
-                      </div>
-                    );
-                  }
-                  
-                  if (part.type === "reasoning") {
-                    return (
-                      <div key={i} className="relative">
-                        <ReasoningContent 
-                          text={(part as any).reasoning} 
+                        <MessageContent
+                          text={part.text}
                           messageId={message.id}
                           documentRegistry={documentRegistry}
                         />
                       </div>
                     );
                   }
-                  
-                  if (part.type === "tool-invocation") {
+
+                  if (part?.type === "reasoning") {
                     return (
-                      <ToolInvocation 
+                      <div key={i} className="relative">
+                        <ReasoningContent
+                          text={part.text ?? part.reasoning ?? ''}
+                          messageId={message.id}
+                          documentRegistry={documentRegistry}
+                        />
+                      </div>
+                    );
+                  }
+
+                  // v6: tool parts are `tool-${name}` or `dynamic-tool`
+                  if (typeof part?.type === 'string' && (part.type.startsWith('tool-') || part.type === 'dynamic-tool')) {
+                    return (
+                      <ToolInvocation
                         key={i}
-                        toolInvocation={part.toolInvocation} 
-                        messageId={message.id} 
+                        part={part}
+                        messageId={message.id}
                         index={i}
                         conversationId={conversationId}
                         status={status}
-                        addToolResult={addToolResult}
                       />
                     );
-                  }                                    
-                  
+                  }
+
                   return null;
                 })}
                 

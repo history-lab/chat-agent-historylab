@@ -1,20 +1,18 @@
 // types.ts
 // Types and interfaces used across the server modules
 
-import { type AgentNamespace } from "agents-sdk";
 import { type Chat } from "./models/chat";
 
-// Environment variables type definition
 export type Env = {
   OPENAI_API_KEY: string;
   GOOGLE_GENERATIVE_AI_API_KEY: string;
   BUCKET: R2Bucket;
-  Chat: AgentNamespace<Chat>;
+  Chat: DurableObjectNamespace<Chat>;
   VECTORIZE_SEARCH: {
     findSimilarEmbeddings(
-      queries: string | string[], 
-      collection_id: string, 
-      topK?: number, 
+      queries: string | string[],
+      collection_id: string,
+      topK?: number,
       filters?: Record<string, any>
     ): Promise<{
       status: string;
@@ -27,7 +25,7 @@ export type Env = {
       message?: string;
       error?: string;
     }>;
-  }; 
+  };
   CONVERSATION_LOGS: KVNamespace;
   FEEDBACK_LOGS: KVNamespace;
 };
@@ -91,4 +89,4 @@ export interface ConversationLog {
     r2Key: string;
     timestamp: string;
   }>;
-} 
+}

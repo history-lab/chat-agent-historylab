@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { useAgent } from "agents-sdk/react";
-import { useAgentChat } from "agents-sdk/ai-react";
-import type { Message } from "@ai-sdk/react";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport, type UIMessage } from "ai";
 import { RefreshCw, AlertTriangle, Loader2, ChevronDown } from 'lucide-react';
 
 import ChatHeader from './ChatHeader';
@@ -15,79 +14,98 @@ import { useAuth } from '../../hooks/useAuth';
 import { AUTH_CONFIG } from '../../config';
 import { exportConversation } from '../../utils/exportConversation';
 
-// Response timeout in milliseconds (5 seconds)
 const RESPONSE_TIMEOUT = 5000;
 
-/**
- * Main chat container component 
- */
 const ChatContainer: React.FC = () => {
-  // State for tracking local submission state (separate from API status)
   const [isSubmitting, setIsSubmitting] = useState(false);
-  
-  // State to track if we're in a limbo state (submitted but no response)
   const [isLimbo, setIsLimbo] = useState(false);
-  
-  // Ref to store timeout ID
   const limboTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  
-  // Track if we're on the first AI response in the conversation
   const isFirstConversationRef = useRef(true);
-    
-  // Reference to the input container
   const inputContainerRef = useRef<HTMLDivElement>(null);
-  
-  // Reference to the end of the messages for scrolling
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  
-  // State to track if the bottom of the chat is visible
   const [isBottomVisible, setIsBottomVisible] = useState(true);
 
-  // Get authentication context
   const { user, isAuthenticated } = useAuth();
-
-  // Get conversation management hooks
-  const {
-    userId,
-    conversationId,
-    createNewConversation,
-    urlCopied,
-    shareConversationUrl
-  } = useConversation();
-
-  // Initialize the document registry
+  const { userId, conversationId, createNewConversation, urlCopied, shareConversationUrl } = useConversation();
   const documentRegistry = useDocumentRegistry();
 
-  // Initialize the agent connection
-  const agent = useAgent({
-    agent: "chat",
-    name: conversationId
+  // Local input state — v3 useChat no longer manages input.
+  const [input, setInput] = useState("");
+
+  // Build extra body data + auth header reactively so the transport stays in sync.
+  const buildExtras = useCallback(() => {
+    const headers: Record<string, string> = {};
+    const body: Record<string, any> = {
+      userId,
+      annotations: { hello: "world" },
+    };
+    if (isAuthenticated && user) {
+      body.authUser = {
+        email: user.email,
+        name: user.name || "",
+        institution: user.institution || "",
+        position: user.position || "",
+      };
+      const token = sessionStorage.getItem(AUTH_CONFIG.TOKEN_KEY);
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+    }
+    return { headers, body };
+  }, [userId, isAuthenticated, user]);
+
+  // Transport instance is memoised by conversationId so the api URL is correct
+  // and rebuildExtras runs per-request via closure.
+  const transport = React.useMemo(() => {
+    return new DefaultChatTransport<UIMessage>({
+      api: `/api/chat/${encodeURIComponent(conversationId)}/messages`,
+      credentials: "include",
+      headers: () => buildExtras().headers,
+      body: () => buildExtras().body,
+    });
+  }, [conversationId, buildExtras]);
+
+  const {
+    messages,
+    sendMessage,
+    setMessages,
+    status,
+    stop,
+  } = useChat({
+    id: conversationId,
+    transport,
   });
 
-  // Hook to manage the chat state and interactions
-  const {
-    messages: agentMessages,
-    input: agentInput,
-    handleInputChange: handleAgentInputChange,
-    handleSubmit: handleAgentSubmit,
-    addToolResult,
-    clearHistory,
-    status,
-  } = useAgentChat({
-    agent,
-    maxSteps: 5,
-  });
+  // Load persisted history whenever the conversation id changes.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/chat/${encodeURIComponent(conversationId)}/messages`, {
+          credentials: "include",
+        });
+        if (!res.ok) return;
+        const initial = (await res.json()) as UIMessage[];
+        if (!cancelled && Array.isArray(initial)) {
+          setMessages(initial);
+        }
+      } catch (err) {
+        console.error("Failed to load initial messages", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId, setMessages]);
 
   // Initialize the feedback hook
-  const { feedbackState, handleFeedback } = useFeedback(conversationId, agentMessages);
+  const { feedbackState, handleFeedback } = useFeedback(conversationId, messages);
 
   // Reset isSubmitting and clear limbo timeout when status changes
   useEffect(() => {
     if (status === "ready" || status === "error" || status === "streaming") {
       setIsSubmitting(false);
       setIsLimbo(false);
-      
-      // Clear timeout if it exists
       if (limboTimeoutRef.current) {
         clearTimeout(limboTimeoutRef.current);
         limboTimeoutRef.current = null;
@@ -95,236 +113,108 @@ const ChatContainer: React.FC = () => {
     }
   }, [status]);
 
-  // Function to reload the page
   const handleReload = () => {
     window.location.reload();
   };
 
-  // Function to open a new conversation in a new tab
   const openNewConversation = () => {
-    // Check if the app is running in an iframe
     const isInIframe = window !== window.parent;
-    
-    console.log("[DEBUG] openNewConversation - isInIframe:", isInIframe);
-    
     if (isInIframe) {
-      // When in iframe, instead of trying to open a new tab, just clear conversation history
-      console.log("[DEBUG] openNewConversation - In iframe: clearing conversation history");
-      clearHistory();
-      
+      // Clear messages locally + create a new conversation id.
+      setMessages([]);
+      createNewConversation();
     } else {
-      // If not in iframe, use current behavior
-      console.log("[DEBUG] openNewConversation - Opening new tab with path:", window.location.pathname);
       window.open(window.location.pathname, '_blank', 'noopener,noreferrer');
     }
   };
 
-  // Simple function to scroll to the bottom of the chat
   const scrollToBottom = useCallback(() => {
     if (messagesEndRef.current) {
-      // This scrolls to our bottom marker div, not to the last message
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
   }, []);
 
-  // Setup intersection observer to detect if bottom is visible
+  // Intersection observer for the "scroll to bottom" pill.
   useEffect(() => {
     if (!messagesEndRef.current) return;
-    
-    // Create an intersection observer
     const observer = new IntersectionObserver(
-      ([entry]) => {
-        // Update state based on whether the bottom element is visible
-        setIsBottomVisible(entry.isIntersecting);
-      },
-      { threshold: 0.1 } // Consider visible if at least 10% is in view
+      ([entry]) => setIsBottomVisible(entry.isIntersecting),
+      { threshold: 0.1 },
     );
-    
-    // Start observing the end element
     observer.observe(messagesEndRef.current);
-    
-    // Clean up observer on unmount
-    return () => {
-      observer.disconnect();
-    };
+    return () => observer.disconnect();
   }, []);
 
-  // Wrapper for handleAgentSubmit to set local submission state and start timeout
-  const handleSubmit = (e: React.FormEvent) => {
-    // Prevent submission if input is blank
-    if (!agentInput.trim()) {
-      return;
-    }
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+  };
 
-    // Check if this is the first message in the conversation
-    const isFirstMessage = agentMessages.length === 0;
-    
-    // If this is the first message, mark it so
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = input.trim();
+    if (!text) return;
+
+    const isFirstMessage = messages.length === 0;
     isFirstConversationRef.current = isFirstMessage;
-    
+
     setIsSubmitting(true);
-    
-    // Start timeout to detect limbo state
     limboTimeoutRef.current = setTimeout(() => {
-      // If we're still submitting after timeout, we're in limbo
       if (isSubmitting) {
         setIsLimbo(true);
       }
     }, RESPONSE_TIMEOUT);
-    
-    // Prepare message metadata with base annotations
-    const metadata: Record<string, any> = {
-      annotations: {
-        hello: "world",
-      },
-    };
-    
-    // Add authenticated user information if available
-    if (isAuthenticated && user) {
-      metadata.authUser = {
-        email: user.email,
-        name: user.name || '',
-        institution: user.institution || '',
-        position: user.position || '',
-      };
-      
-      // Add JWT token from sessionStorage to headers if available
-      const token = sessionStorage.getItem(AUTH_CONFIG.TOKEN_KEY);
-      if (token) {
-        metadata.headers = {
-          Authorization: `Bearer ${token}`
-        };
-      }
-    }
-    
-    // Pass user ID from conversation hook (which now uses auth UUID when available)
-    metadata.userId = userId;
 
-    handleAgentSubmit(e, { data: metadata });
-    
-    // No auto-scrolling after submission anymore
+    sendMessage({ role: "user", parts: [{ type: "text", text }] });
+    setInput("");
   };
 
-  // If conversation changes or is cleared, reset the first conversation flag
+  // If the conversation changes or is cleared, reset the first conversation flag
   useEffect(() => {
-    if (agentMessages.length === 0) {
+    if (messages.length === 0) {
       isFirstConversationRef.current = true;
     }
-  }, [agentMessages.length, conversationId]);
+  }, [messages.length, conversationId]);
 
-  // Keep-alive mechanism to maintain warm Durable Object connection
-  useEffect(() => {
-    const keepAliveIntervalRef = { current: null as NodeJS.Timeout | null };
-    
-    // Only set up keep-alive if we have an agent and a conversation ID
-    if (agent && conversationId) {
-      // Function to send a keep-alive ping
-      const sendKeepAlive = async () => {
-        try {
-          // A minimal interaction with the agent to keep the connection alive
-          if (agent && typeof agent.send === 'function') {
-            // Empty implementation to avoid errors
-          }
-        } catch (err) {
-          console.log('Keep-alive error (non-critical):', err);
-        }
-      };
-      
-      // Initial ping
-      sendKeepAlive();
-      
-      // Set up regular interval (every 45 seconds to stay under CF 60s timeout)
-      keepAliveIntervalRef.current = setInterval(sendKeepAlive, 5000);
-    }
-    
-    // Clean up interval on unmount
-    return () => {
-      if (keepAliveIntervalRef.current) {
-        clearInterval(keepAliveIntervalRef.current);
-        keepAliveIntervalRef.current = null;
-        console.log('WebSocket keep-alive disabled');
-      }
-    };
-  }, [agent, conversationId]);
-
-  // Add status monitoring to reload page if undefined for too long
+  // Reload page if status hangs on submitted (rough liveness check).
   useEffect(() => {
     let timeoutId: NodeJS.Timeout | null = null;
-
-    // If status is undefined, start a timer
     if (status === 'submitted') {
       timeoutId = setTimeout(() => {
         console.log('Status remained submitted for too long - reloading page');
         window.location.reload();
-      }, 10000); // 10 second timeout
+      }, 10000);
     }
-
-    // Cleanup function to clear timeout if status changes before timeout
     return () => {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
+      if (timeoutId) clearTimeout(timeoutId);
     };
   }, [status]);
-
-  // Debug logging for status
-  // useEffect(() => {
-  //   const intervalId = setInterval(() => {
-  //     console.log('Current chat status:', status);
-  //   }, 5000);
-
-  //   return () => clearInterval(intervalId);
-  // }, [status]);
 
   // Track user activity and reload on inactivity
   useEffect(() => {
     let inactivityTimeout: NodeJS.Timeout | null = null;
     let lastActivityTime = Date.now();
-
-    // Function to reset the inactivity timer
     const resetInactivityTimer = () => {
       lastActivityTime = Date.now();
-      if (inactivityTimeout) {
-        clearTimeout(inactivityTimeout);
-      }
-      
+      if (inactivityTimeout) clearTimeout(inactivityTimeout);
       inactivityTimeout = setTimeout(() => {
         const timeSinceLastActivity = Date.now() - lastActivityTime;
-        if (timeSinceLastActivity >= 60000) { // 1 minute
+        if (timeSinceLastActivity >= 60000) {
           console.log('Page inactive for 1 minute - reloading');
           window.location.reload();
         }
-      }, 60000); // Check after 1 minute
+      }, 60000);
     };
-
-    // Events to track user activity
-    const activityEvents = [
-      'mousedown', 'mousemove', 'keydown',
-      'scroll', 'touchstart', 'wheel', 'focus'
-    ];
-
-    // Add event listeners
-    activityEvents.forEach(eventName => {
-      window.addEventListener(eventName, resetInactivityTimer);
-    });
-
-    // Initial setup
+    const activityEvents = ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart', 'wheel', 'focus'];
+    activityEvents.forEach((eventName) => window.addEventListener(eventName, resetInactivityTimer));
     resetInactivityTimer();
-
-    // Cleanup
     return () => {
-      if (inactivityTimeout) {
-        clearTimeout(inactivityTimeout);
-      }
-      activityEvents.forEach(eventName => {
-        window.removeEventListener(eventName, resetInactivityTimer);
-      });
+      if (inactivityTimeout) clearTimeout(inactivityTimeout);
+      activityEvents.forEach((eventName) => window.removeEventListener(eventName, resetInactivityTimer));
     };
-  }, []); // Empty dependency array since this should only set up once
+  }, []);
 
-  // Add citation styles to document head, update on status change
+  // Citation styles
   useEffect(() => {
-    // Base styles for the citation buttons
     let citationStyles = `
       .citation {
         display: inline-flex;
@@ -352,8 +242,6 @@ const ChatContainer: React.FC = () => {
         background-color: #4a80b0;
       }
     `;
-    
-    // Add hover effect conditionally
     const hoverStyles = status !== 'streaming' ? `
       .citation:hover {
         background-color: #5a90c0;
@@ -361,8 +249,6 @@ const ChatContainer: React.FC = () => {
       }
     ` : '';
     citationStyles += hoverStyles;
-    
-    // Create or update style element
     let styleElement = document.getElementById('citation-styles');
     if (!styleElement) {
       styleElement = document.createElement('style');
@@ -372,7 +258,7 @@ const ChatContainer: React.FC = () => {
     styleElement.textContent = citationStyles;
   }, [status]);
 
-  // Add global click handler for citations
+  // Global click handler for citations
   useEffect(() => {
     const handleGlobalCitationClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
@@ -383,36 +269,21 @@ const ChatContainer: React.FC = () => {
         }
       }
     };
-    
-    // Add event listener to the document
     document.addEventListener('click', handleGlobalCitationClick);
-    
-    // Clean up
-    return () => {
-      document.removeEventListener('click', handleGlobalCitationClick);
-    };
+    return () => document.removeEventListener('click', handleGlobalCitationClick);
   }, []);
 
-  // Process all messages to extract and register documents from tool responses
+  // Process all messages to extract and register documents from queryCollection results.
+  // v6 tool parts use `type: \`tool-${name}\``, `state: 'output-available'`, and `output`.
   useEffect(() => {
-    // Skip if no messages
-    if (!agentMessages || agentMessages.length === 0) return;
-    
-    // Process all messages to find queryCollection results
-    agentMessages.forEach(message => {
-      if (message.role !== 'assistant' || !message.parts) return;
-      
-      message.parts.forEach(part => {
-        if (part.type !== 'tool-invocation') return;
-        
-        const toolInvocation = (part as any).toolInvocation;
-        if (toolInvocation?.toolName !== 'queryCollection' || toolInvocation?.state !== 'result') return;
-        
-        // Process queryCollection result
-        const result = toolInvocation.result;
-        if (!result || !result.documents || !Array.isArray(result.documents)) return;
-        
-        // Register all documents from the search results
+    if (!messages || messages.length === 0) return;
+    messages.forEach((message: any) => {
+      if (message.role !== 'assistant' || !Array.isArray(message.parts)) return;
+      message.parts.forEach((part: any) => {
+        if (part?.type !== 'tool-queryCollection') return;
+        if (part.state !== 'output-available') return;
+        const result = part.output;
+        if (!result || !Array.isArray(result.documents)) return;
         result.documents.forEach((doc: any) => {
           if (doc.file_info?.r2Key) {
             const title = doc.file_info?.metadata?.title || doc.document_id || `Document`;
@@ -421,21 +292,20 @@ const ChatContainer: React.FC = () => {
         });
       });
     });
-  }, [agentMessages, documentRegistry]);
+  }, [messages, documentRegistry]);
 
-  // Helper function to handle export
   const handleExportConversation = () => {
-    exportConversation(agentMessages, documentRegistry);
+    exportConversation(messages, documentRegistry);
   };
 
-  // Helper function to handle example query selection
   const handleExampleQuerySelect = (query: string) => {
-    handleAgentInputChange({ target: { value: query } } as React.ChangeEvent<HTMLTextAreaElement>);
+    setInput(query);
     setTimeout(() => {
       if (!isSubmitting && status !== "streaming" && status !== "error") {
-        const form = document.querySelector('form');
-        if (form) {
-          form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+        const text = query.trim();
+        if (text) {
+          sendMessage({ role: "user", parts: [{ type: "text", text }] });
+          setInput("");
         }
       }
     }, 100);
@@ -443,21 +313,21 @@ const ChatContainer: React.FC = () => {
 
   return (
     <div className="flex min-h-screen w-full flex-col bg-white text-gray-800 font-sans antialiased transition-all pb-0 selection:bg-[#6CA0D6] selection:text-white">
-      <ChatHeader 
+      <ChatHeader
         status={status}
-        hasMessages={agentMessages.length > 0}
+        hasMessages={messages.length > 0}
         urlCopied={urlCopied}
         shareConversationUrl={shareConversationUrl}
         exportConversation={handleExportConversation}
         openNewConversation={openNewConversation}
       />
-      
+
       <div className="flex-1 overflow-hidden pb-20 bg-white">
         <div className="mx-auto max-w-6xl mt-4 mb-0 flex-1 overflow-hidden px-4 lg:px-8 py-0">
           <div className="flex flex-col">
             <div className="flex-1 overflow-y-auto mt-2 pr-2 custom-scrollbar bg-white">
               <div className="pb-[80px] bg-white">
-                {agentMessages.length === 0 ? (
+                {messages.length === 0 ? (
                   <div className="bg-white p-4 m-4 mt-8 rounded-lg border border-gray-200">
                     <div className="markdown-condensed text-[#6CA0D6] text-sm text-left mb-4 font-sans">
                       <div className="whitespace-pre-wrap break-words text-gray-800 markdown-condensed">
@@ -471,9 +341,8 @@ const ChatContainer: React.FC = () => {
                   </div>
                 ) : (
                   <>
-                    {agentMessages.map((message: Message, index) => {
-                      const isLastMessage = index === agentMessages.length - 1;
-                      
+                    {messages.map((message, index) => {
+                      const isLastMessage = index === messages.length - 1;
                       return (
                         <ChatMessage
                           key={message.id}
@@ -482,13 +351,12 @@ const ChatContainer: React.FC = () => {
                           status={status}
                           documentRegistry={documentRegistry}
                           conversationId={conversationId}
-                          addToolResult={addToolResult}
                           feedbackState={feedbackState}
                           handleFeedback={handleFeedback}
                         />
                       );
                     })}
-                    
+
                     {isLimbo && (
                       <div className="mb-4 flex flex-col items-start p-1">
                         <div className="flex w-full max-w-4xl justify-start">
@@ -529,7 +397,7 @@ const ChatContainer: React.FC = () => {
                         </div>
                       </div>
                     )}
-                    
+
                     {status === "error" && (
                       <div className="mb-4 flex flex-col items-start p-1">
                         <div className="flex w-full max-w-4xl justify-start">
@@ -571,11 +439,10 @@ const ChatContainer: React.FC = () => {
                     )}
                   </>
                 )}
-                
-                {/* Marker div at the bottom with actual height instead of margin for better scrolling */}
-                <div 
-                  ref={messagesEndRef} 
-                  style={{ height: '11vh', width: '100%' }} 
+
+                <div
+                  ref={messagesEndRef}
+                  style={{ height: '11vh', width: '100%' }}
                   aria-hidden="true"
                   className="bg-white"
                 />
@@ -584,9 +451,8 @@ const ChatContainer: React.FC = () => {
           </div>
         </div>
       </div>
-      
-      {/* Scroll to bottom button - only visible when bottom is not in view */}
-      {!isBottomVisible && agentMessages.length > 0 && (
+
+      {!isBottomVisible && messages.length > 0 && (
         <div className="fixed bottom-28 left-1/2 transform -translate-x-1/2 z-30">
           <button
             onClick={scrollToBottom}
@@ -597,44 +463,34 @@ const ChatContainer: React.FC = () => {
           </button>
         </div>
       )}
-            
-      {/* Fixed input container - white background at the bottom portion */}
-      <div 
+
+      <div
         ref={inputContainerRef}
-        className="fixed bottom-0 left-0 right-0 z-20" 
-        style={{ 
-          background: 'linear-gradient(to bottom, transparent, white 15%, white)' 
-        }}
+        className="fixed bottom-0 left-0 right-0 z-20"
+        style={{ background: 'linear-gradient(to bottom, transparent, white 15%, white)' }}
       >
         <div className="mx-auto max-w-6xl px-4 lg:px-8">
-          {/* Loading indicator when submitting */}
           {status === 'submitted' && (
             <div className="flex justify-center items-center py-2">
               <Loader2 className="h-5 w-5 text-gray-500 animate-spin" />
             </div>
           )}
           <ChatInput
-            input={agentInput}
+            input={input}
             isSubmitting={isSubmitting}
             status={status}
-            handleInputChange={handleAgentInputChange}
+            handleInputChange={handleInputChange}
             handleSubmit={handleSubmit}
           />
-          
-          {/* Ramus footer now inside the fixed container */}
-          <div className="flex justify-center text-gray-500 text-xs font-mono mb-2">            
-            <a 
-              href="https://landing.ramus.network" 
-              target="_blank" 
-              rel="noopener noreferrer" 
-              className="inline-flex items-center gap-1.5 text-[#6CA0D6] font-medium hover:underline cursor-pointer transition-colors"
-            >              
-              <span className="font-sans">Built on the Ramus Network</span>
-              <img 
-                src="/logo.png" 
-                alt="Ramus Logo" 
-                className="h-3.5 w-auto object-contain" 
-              />
+
+          <div className="flex justify-center text-gray-500 text-xs font-mono mb-2">
+            <a
+              href="https://landing.ramus.network"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-gray-500 hover:text-[#6CA0D6] transition-colors"
+            >
+              powered by ramus
             </a>
           </div>
         </div>

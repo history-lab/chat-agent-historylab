@@ -1,18 +1,19 @@
-import type { Message } from "@ai-sdk/react";
+import type { UIMessage } from "@ai-sdk/react";
 import { formatTime } from "./formatting";
 import type { DocumentRegistryType } from "../components/documents/DocumentRegistry";
 
+// v6 UIMessage has no top-level `content` or `createdAt`. Local alias keeps
+// the rest of this file readable while we still annotate optional legacy fields.
+type Message = UIMessage & { content?: string; createdAt?: string | Date };
+
 /**
  * Extract text content from message parts
- * @param message The message object
- * @returns Extracted text content
  */
 export const extractMessageText = (message: Message): string => {
   if (!message.parts || message.parts.length === 0) return '';
-  
   return message.parts
-    .filter(part => part.type === 'text')
-    .map(part => (part.type === 'text' ? part.text : ''))
+    .filter((part: any) => part?.type === 'text')
+    .map((part: any) => part.text ?? '')
     .join('\n\n');
 };
 
@@ -69,20 +70,15 @@ export function exportConversation(
           if (!documentReferences.has(r2Key)) {
             const title = documentRegistry.getDocumentTitle(r2Key) || `Document #${docId}`;
             
-            // Try to find this document in message tool results to get full metadata
-            let metadata = {};
+            // Try to find this document in message tool results to get full metadata.
+            // v6: tool parts are `type: \`tool-${toolName}\`` with `state: "output-available"` and `output`.
+            let metadata: Record<string, any> = {};
             if (message.parts) {
-              for (const part of message.parts) {
-                if (part.type === 'tool-invocation' && 
-                    part.toolInvocation?.toolName === 'queryCollection' && 
-                    part.toolInvocation.state === 'result' && 
-                    part.toolInvocation.result?.documents) {
-                  
-                  // Look for this r2Key in the documents
-                  const foundDoc = (part.toolInvocation.result.documents || []).find(
-                    (doc: any) => doc.file_info?.r2Key === r2Key
+              for (const part of message.parts as any[]) {
+                if (part?.type === 'tool-queryCollection' && part.state === 'output-available' && part.output?.documents) {
+                  const foundDoc = (part.output.documents || []).find(
+                    (doc: any) => doc.file_info?.r2Key === r2Key,
                   );
-                  
                   if (foundDoc && foundDoc.file_info?.metadata) {
                     metadata = foundDoc.file_info.metadata;
                     break;
@@ -102,13 +98,10 @@ export function exportConversation(
       
       // Include tool invocations if present
       if (message.parts) {
-        message.parts.forEach(part => {
-          if (part.type === 'tool-invocation' && part.toolInvocation?.state === 'result') {
-            const toolName = part.toolInvocation.toolName;
-            
-            // Handle queryCollection tool results
-            if (toolName === 'queryCollection' && part.toolInvocation.result) {
-              const result = part.toolInvocation.result;
+        (message.parts as any[]).forEach((part) => {
+          if (part?.type === 'tool-queryCollection' && part.state === 'output-available') {
+            const result = part.output;
+            if (result) {
               if (result.status === 'success' || result.status === 'partial_success') {
                 if (result.documents && result.documents.length > 0) {                    
                   markdownContent += `### Documents Found (${result.documents.length})\n\n`;

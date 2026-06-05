@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import type { Message } from "@ai-sdk/react";
+import type { UIMessage as Message } from "@ai-sdk/react";
 
 type FeedbackType = 'like' | 'dislike' | null;
 type FeedbackState = Record<string, FeedbackType>;

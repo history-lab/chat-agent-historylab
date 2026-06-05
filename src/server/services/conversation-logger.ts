@@ -1,7 +1,11 @@
 // services/conversation-logger.ts
 // Service for handling conversation logging functionality
 
-import { type Message } from "ai";
+import { type UIMessage } from "ai";
+
+// Local alias keeps the rest of the file readable while we migrate from
+// AI SDK v4's `Message` to v6's `UIMessage`.
+type Message = UIMessage & { content?: string; createdAt?: string | Date };
 import { logDebug, logInfo, logError } from "../../shared";
 import { type ConversationLog } from "../types";
 
@@ -199,74 +203,56 @@ export class ConversationLogger {
   /**
    * Create message objects for logging from user and assistant messages
    */
+  private extractTextFromParts(message: Message | undefined): string {
+    if (!message || !Array.isArray(message.parts)) return "";
+    return message.parts
+      .filter((p: any) => p?.type === "text")
+      .map((p: any) => p.text ?? "")
+      .join("\n\n");
+  }
+
   private createMessageObjects(
-    lastUserMessage: Message | undefined, 
-    lastAssistantMessage: Message | undefined, 
-    lastUserMessageIndex: number, 
-    assistantMessageIndex: number
+    lastUserMessage: Message | undefined,
+    lastAssistantMessage: Message | undefined,
+    lastUserMessageIndex: number,
+    assistantMessageIndex: number,
   ): ConversationLog['messageObjects'] {
-    // Extract and truncate the user message content for logging
-    const userMessageContent = lastUserMessage ? 
-      (typeof lastUserMessage.content === 'string' ? 
-        lastUserMessage.content : 
-        JSON.stringify(lastUserMessage.content)) 
-      : '';
-    const truncatedUserMessage = userMessageContent.length > 1000 ? 
-      userMessageContent.substring(0, 1000) + '...' : 
-      userMessageContent;
-    
-    // Create the user message object for logging
+    const userText = this.extractTextFromParts(lastUserMessage);
+    const truncatedUserMessage = userText.length > 1000 ? userText.substring(0, 1000) + "..." : userText;
+
     const userMsgObj: ConversationLog['messageObjects'][number] | null = lastUserMessage ? {
       index: lastUserMessageIndex,
       role: 'user',
-      id: lastUserMessage.id || `msg-${lastUserMessageIndex}`, // Use ID or generate one
+      id: lastUserMessage.id || `msg-${lastUserMessageIndex}`,
       content: truncatedUserMessage,
-      timestamp: new Date(lastUserMessage.createdAt ?? Date.now()).toISOString()
+      timestamp: new Date(lastUserMessage.createdAt ?? Date.now()).toISOString(),
     } : null;
-    
-    // Extract and truncate the assistant message content for logging
-    const assistantMessageContent = lastAssistantMessage ?
-      (typeof lastAssistantMessage.content === 'string' ? 
-        lastAssistantMessage.content : 
-        JSON.stringify(lastAssistantMessage.content)) 
-      : '';
-    const truncatedAssistantMessage = assistantMessageContent.length > 4000 ? 
-      assistantMessageContent.substring(0, 4000) + '...' : 
-      assistantMessageContent;
 
-    // Create the assistant message object for logging
+    const assistantText = this.extractTextFromParts(lastAssistantMessage);
+    const truncatedAssistantMessage = assistantText.length > 4000
+      ? assistantText.substring(0, 4000) + "..."
+      : assistantText;
+
     const assistantMsgObj: ConversationLog['messageObjects'][number] | null = lastAssistantMessage ? {
       index: assistantMessageIndex,
       role: 'assistant',
       id: lastAssistantMessage.id,
       content: truncatedAssistantMessage,
       timestamp: new Date(lastAssistantMessage.createdAt ?? Date.now()).toISOString(),
-      feedback: null // Initialize feedback as null
+      feedback: null,
     } : null;
 
-    // Filter out null messages before adding to array
     return [userMsgObj, assistantMsgObj].filter(Boolean) as ConversationLog['messageObjects'];
   }
 
-  /**
-   * Calculate character counts for user input and assistant output
-   */
-  private calculateCharacterCounts(lastUserMessage: Message | undefined, lastAssistantMessage: Message | undefined): { userInputChars: number, assistantOutputChars: number } {
-    // Find the last user message to calculate input characters
-    const userInputChars = lastUserMessage ? 
-      (typeof lastUserMessage.content === 'string' ? 
-        lastUserMessage.content.length : 
-        JSON.stringify(lastUserMessage.content).length) 
-      : 0;
-    
-    // Calculate output characters using the existing lastAssistantMessage variable
-    const assistantOutputChars = lastAssistantMessage ? 
-      (typeof lastAssistantMessage.content === 'string' ? 
-        lastAssistantMessage.content.length : 
-        JSON.stringify(lastAssistantMessage.content).length) 
-      : 0;
-      
-    return { userInputChars, assistantOutputChars };
+  private calculateCharacterCounts(
+    lastUserMessage: Message | undefined,
+    lastAssistantMessage: Message | undefined,
+  ): { userInputChars: number; assistantOutputChars: number } {
+    return {
+      userInputChars: this.extractTextFromParts(lastUserMessage).length,
+      assistantOutputChars: this.extractTextFromParts(lastAssistantMessage).length,
+    };
   }
 
   /**
@@ -279,53 +265,46 @@ export class ConversationLogger {
     const lastUserMessageIndex = messages.length - 2; // Last user message before the assistant response
     const lastUserMessage = messages[lastUserMessageIndex];
     
-    // Extract query details from message parts
+    // Extract query details from message parts.
+    // v6 represents tool invocations as discriminated parts with `type: \`tool-${toolName}\``,
+    // `state`, `input`, and `output` fields.
     if (lastAssistantMessage && Array.isArray(lastAssistantMessage.parts)) {
-      lastAssistantMessage.parts.forEach(part => {
-        // Check if the part is a tool invocation for 'queryCollection'
-        if (part.type === 'tool-invocation' && part.toolInvocation?.toolName === 'queryCollection') {
-          const toolInvocation = part.toolInvocation;
-          const args = toolInvocation.args || {};
-          
-          // Only process if the tool invocation has a result
-          if (toolInvocation.state === 'result') {
-            // Access the result from toolInvocation.result
-            const result = toolInvocation.result || {}; // Use {} as default if result is null/undefined
-            
-            // Create a record of this query
-            const queryDetail = {
-              toolCallId: toolInvocation.toolCallId || '',
-              timestamp: new Date().toISOString(),
-              query: args.query || '',
-              userMessageIndex: lastUserMessageIndex, // Link to the user message that triggered this
-              userMessageId: lastUserMessage?.id || '', // Store the actual message ID for direct reference
-              dateFilters: {
-                authored_start_year_month: args.authored_start_year_month,
-                authored_end_year_month: args.authored_end_year_month,
-                authored_start_year_month_day: args.authored_start_year_month_day,
-                authored_end_year_month_day: args.authored_end_year_month_day,
-              },
-              documentResults: [] // Initialize as empty array
-            };
-            
-            // Extract document results if available and status is 'success'
-            if (result.status === 'success' || result.status === 'partial_success' && Array.isArray(result.documents)) {
-              queryDetail.documentResults = this.extractDocumentResults(result.documents);
-            } else if (result.status !== 'success') {
-              logInfo("ConversationLogger.extractQueryDetails", "Query Collection tool did not succeed", { 
-                toolCallId: toolInvocation.toolCallId, 
-                status: result.status 
-              });
-            }
-            
-            queryDetails.push(queryDetail);
-          } else {
-             logDebug("ConversationLogger.extractQueryDetails", "Skipping tool invocation part without result state", { 
-               toolCallId: toolInvocation.toolCallId, 
-               state: toolInvocation.state 
-             });
-          }
+      lastAssistantMessage.parts.forEach((part: any) => {
+        if (part?.type !== "tool-queryCollection") return;
+        if (part.state !== "output-available") {
+          logDebug("ConversationLogger.extractQueryDetails", "Skipping tool part without output", {
+            toolCallId: part.toolCallId,
+            state: part.state,
+          });
+          return;
         }
+        const args = part.input || {};
+        const result = part.output || {};
+        const queryDetail: ConversationLog['queries']['details'][number] = {
+          toolCallId: part.toolCallId || '',
+          timestamp: new Date().toISOString(),
+          query: args.query || '',
+          userMessageIndex: lastUserMessageIndex,
+          userMessageId: lastUserMessage?.id || '',
+          dateFilters: {
+            authored_start_year_month: args.authored_start_year_month,
+            authored_end_year_month: args.authored_end_year_month,
+            authored_start_year_month_day: args.authored_start_year_month_day,
+            authored_end_year_month_day: args.authored_end_year_month_day,
+          },
+          documentResults: [],
+        };
+
+        if ((result.status === "success" || result.status === "partial_success") && Array.isArray(result.documents)) {
+          queryDetail.documentResults = this.extractDocumentResults(result.documents);
+        } else if (result.status && result.status !== "success") {
+          logInfo("ConversationLogger.extractQueryDetails", "Query Collection tool did not succeed", {
+            toolCallId: part.toolCallId,
+            status: result.status,
+          });
+        }
+
+        queryDetails.push(queryDetail);
       });
     }
     

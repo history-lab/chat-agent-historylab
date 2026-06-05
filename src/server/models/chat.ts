@@ -1,42 +1,35 @@
 // models/chat.ts
-// Chat Agent implementation that handles real-time AI chat interactions
+// Chat Durable Object — handles real-time AI chat backed by streamText + SSE.
 
-import {
-    type Schedule
-  } from "agents-sdk";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { AIChatAgent } from "agents-sdk/ai-chat-agent";
+import { DurableObject } from "cloudflare:workers";
 import {
-  createDataStreamResponse,
-  generateId,
   streamText,
-  type StreamTextOnFinishCallback, 
-  type LanguageModelV1,
+  convertToModelMessages,
+  stepCountIs,
+  type UIMessage,
+  type LanguageModel,
 } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 
-import { processToolCalls } from "../utils/tool-utils";
 import { logDebug, logInfo, logError } from "../../shared";
-import { type Env, type ConversationLog } from "../types";
-import { tools, executions } from "../../tools";
-import { COLLECTION_ID, useGemini, getSystemPrompt } from "../config";
+import { type Env } from "../types";
+import { tools } from "../../tools";
+import { useGemini, getSystemPrompt } from "../config";
 import { decodeHashedComponents } from "../utils/hash-utils";
 import { ConversationLogger } from "../services/conversation-logger";
 
-// We use ALS to expose the agent context to the tools
+// ALS exposes the active Chat DO (and thus env) to tool executions.
 export const agentContext = new AsyncLocalStorage<Chat>();
 
-/**
- * Chat Agent implementation that handles real-time AI chat interactions
- */
-export class Chat extends AIChatAgent<Env> {
-  public env: Env;
+const STORAGE_KEY = "messages";
+
+export class Chat extends DurableObject<Env> {
   private conversationLogger: ConversationLogger;
 
-  constructor(state: DurableObjectState, env: Env, name?: string) {
-    super(state, env);
-    this.env = env;
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
     this.conversationLogger = new ConversationLogger(env.CONVERSATION_LOGS);
   }
 
@@ -52,151 +45,124 @@ export class Chat extends AIChatAgent<Env> {
     return this.env.FEEDBACK_LOGS;
   }
 
-  /**
-   * Handles incoming chat messages and manages the response stream
-   * @param onFinish - Callback function executed when streaming completes
-   */
-  // biome-ignore lint/complexity/noBannedTypes: <explanation>
-  async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
-    logInfo("Chat.onChatMessage", "Starting chat message processing");
+  // Stored messages (for export, feedback hook).
+  public get name(): string {
+    return this._name ?? "";
+  }
+  private _name: string | undefined;
 
-    // Get the hashed ID from the agent name and decode it
-    let userId = "unknown";
-    let collectionId = COLLECTION_ID;
-    let convoId = "unknown";
-    
-    if (this.name) {
-      try {
-        const decodedComponents = decodeHashedComponents(this.name);
-        userId = decodedComponents.userId;
-        collectionId = decodedComponents.collectionId;
-        convoId = decodedComponents.convoId;
-        
-        logInfo("Chat.onChatMessage", "Successfully decoded conversation components", { 
-          userId, 
-          collectionId, 
-          convoId 
-        });
-      } catch (error) {
-        logInfo("Chat.onChatMessage", "Failed to decode conversation components, using defaults", { 
-          error, 
-          agentName: this.name 
-        });
-      }
-    } else {
-      logInfo("Chat.onChatMessage", "No agent name provided, using default values");
+  public messages: UIMessage[] = [];
+
+  private async loadMessages(): Promise<UIMessage[]> {
+    const stored = await this.ctx.storage.get<UIMessage[]>(STORAGE_KEY);
+    this.messages = stored ?? [];
+    return this.messages;
+  }
+
+  private async saveMessages(msgs: UIMessage[]): Promise<void> {
+    this.messages = msgs;
+    await this.ctx.storage.put(STORAGE_KEY, msgs);
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    // The hashed name is provided by the worker via the `cf-chat-id` header so
+    // the DO knows its own logical identifier for logging + decoding.
+    this._name = request.headers.get("cf-chat-id") ?? this._name;
+
+    logDebug("Chat.fetch", "request", { method: request.method, path, name: this._name });
+
+    if (request.method === "GET" && path.endsWith("/messages")) {
+      const msgs = await this.loadMessages();
+      return Response.json(msgs);
     }
-  
-    logInfo("Chat.onChatMessage", "Connection info", { 
-      userId, 
-      collectionId, 
-      convoId 
-    });  
 
-    // Initialize conversation log
+    if (request.method === "POST" && path.endsWith("/messages")) {
+      return this.handleChatPost(request);
+    }
+
+    return new Response("Not Found", { status: 404 });
+  }
+
+  private async handleChatPost(request: Request): Promise<Response> {
+    let payload: { messages: UIMessage[] };
+    try {
+      payload = await request.json<{ messages: UIMessage[] }>();
+    } catch (err) {
+      logError("Chat.handleChatPost", "Invalid JSON body", err);
+      return new Response("Invalid JSON", { status: 400 });
+    }
+
+    const incoming = payload.messages ?? [];
+    if (incoming.length === 0) {
+      return new Response("messages required", { status: 400 });
+    }
+
+    await this.saveMessages(incoming);
+
+    // Decode conversation identity for logging
+    let userId = "unknown";
+    let collectionId = "unknown";
+    let convoId = "unknown";
+    if (this._name) {
+      try {
+        const decoded = decodeHashedComponents(this._name);
+        userId = decoded.userId;
+        collectionId = decoded.collectionId;
+        convoId = decoded.convoId;
+      } catch (err) {
+        logError("Chat.handleChatPost", "Failed to decode name", err, { name: this._name });
+      }
+    }
+
     await this.conversationLogger.initConversationLog(userId, collectionId, convoId);
 
-    // Create a streaming response that handles both text and tool outputs
     return agentContext.run(this, async () => {
-      logDebug("Chat.onChatMessage", "Setting up data stream response");
-      const dataStreamResponse = createDataStreamResponse({
-        execute: async (dataStream) => {          
-          logDebug("Chat.onChatMessage", "Processing pending tool calls", { messageCount: this.messages.length });
-          // Process any pending tool calls from previous messages
-          // This handles human-in-the-loop confirmations for tools
-          const processedMessages = await processToolCalls({
-            messages: this.messages,
-            dataStream,
-            tools,
-            executions,
-          });
+      let model: LanguageModel;
+      if (useGemini) {
+        logInfo("Chat.handleChatPost", "Initializing Gemini");
+        const googleAI = createGoogleGenerativeAI({
+          apiKey: this.env.GOOGLE_GENERATIVE_AI_API_KEY,
+        });
+        model = googleAI("models/gemini-3.5-flash");
+      } else {
+        logInfo("Chat.handleChatPost", "Initializing OpenAI");
+        const openai = createOpenAI({ apiKey: this.env.OPENAI_API_KEY });
+        model = openai("gpt-4o-2024-11-20");
+      }
 
-          // Declare model variable that will be set in the conditionals
-          let model;
-
-          if (useGemini) {
-            logInfo("Chat.onChatMessage", "Initializing Gemini client");                              
-            // Initialize Google client with API key from environment
-            const googleAI = createGoogleGenerativeAI({
-              apiKey: this.env.GOOGLE_GENERATIVE_AI_API_KEY
-            });
-            // NOTE: All Gemini 3.x models (including lite) require a
-            // thought_signature round-tripped in functionCall parts
-            // (https://ai.google.dev/gemini-api/docs/thought-signatures).
-            // The pinned @ai-sdk/google@1.2.10 does not emit it, so multi-step
-            // tool calls fail on the second-step request with 400 INVALID_ARGUMENT.
-            // Until we bump the AI SDK to v5, we stay on Gemini 2.x which
-            // predates the signature requirement. 2.5-flash-lite has an
-            // earliest-shutdown date of Oct 16, 2026 — buys ~4 months runway.
-            model = googleAI("models/gemini-2.5-flash-lite");
-          } else {
-            logInfo("Chat.onChatMessage", "Initializing OpenAI client");                  
-              
-            // Initialize OpenAI client with API key from environment
-            const openai = createOpenAI({
-              apiKey: this.env.OPENAI_API_KEY,
-            });
-
-            const model_name = "gpt-4o-2024-11-20";
-            // const model_name = "gpt-4o-mini-2024-07-18";
-
-            logDebug("Chat.onChatMessage", "Starting AI stream", { model: model_name });
-            model = openai(model_name);
-          }
-
-          logDebug("Chat.onChatMessage", "Starting AI stream");
-          // Stream the AI response using the model initialized within this scope
-          const result = streamText({
-            model: model as LanguageModelV1,
-            system: getSystemPrompt(),
-            messages: processedMessages,
-            tools,
-            onError: (error) => {
-                logError("Chat.onChatMessage", "Error in AI stream", error);                
-              },
-            onFinish: async (event) => {
-              // First, call the original onFinish callback if it exists
-              if (onFinish) {
-                await onFinish(event as any);                          
-              }
-
-              // Use the conversation logger to process and log the stream completion
-              await this.conversationLogger.processStreamCompletion(
-                event, 
-                this.messages, 
-                userId, 
-                collectionId, 
-                convoId
-              );
-            },
-            maxSteps: 10,
-          });
-
-          logDebug("Chat.onChatMessage", "Merging AI response stream with tool outputs");
-          // Merge the AI response stream with tool execution outputs
+      const modelMessages = await convertToModelMessages(incoming);
+      const result = streamText({
+        model,
+        system: getSystemPrompt(),
+        messages: modelMessages,
+        tools,
+        stopWhen: stepCountIs(10),
+        onError: (error) => {
+          logError("Chat.handleChatPost", "Error in AI stream", error);
+        },
+        onFinish: async (event) => {
           try {
-            result.mergeIntoDataStream(dataStream);
-          } catch (error) {
-            logError("Chat.onChatMessage", "Error merging AI response stream with tool outputs", error);
-            // Try to gracefully continue despite merge errors
+            await this.conversationLogger.processStreamCompletion(
+              event,
+              this.messages,
+              userId,
+              collectionId,
+              convoId,
+            );
+          } catch (err) {
+            logError("Chat.handleChatPost", "conversation logger failed", err);
           }
         },
       });
 
-      return dataStreamResponse;
+      return result.toUIMessageStreamResponse({
+        originalMessages: incoming,
+        onFinish: async ({ messages: updated }) => {
+          await this.saveMessages(updated);
+        },
+      });
     });
   }
-
-  async executeTask(description: string, task: Schedule<string>) {
-    logInfo("Chat.executeTask", "Executing scheduled task", { description });
-    await this.saveMessages([
-      ...this.messages,
-      {
-        id: generateId(),
-        role: "user",
-        content: `scheduled message: ${description}`,
-      },
-    ]);
-    logDebug("Chat.executeTask", "Task execution completed");
-  }
-} 
+}
