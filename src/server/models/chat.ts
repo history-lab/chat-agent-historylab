@@ -120,7 +120,14 @@ export class Chat extends AIChatAgent<Env> {
             const googleAI = createGoogleGenerativeAI({
               apiKey: this.env.GOOGLE_GENERATIVE_AI_API_KEY
             });
-            model = googleAI("models/gemini-3.5-flash");
+            // NOTE: Gemini 3.x "thinking" models require a thought_signature
+            // round-tripped in functionCall parts (see
+            // https://ai.google.dev/gemini-api/docs/thought-signatures).
+            // The pinned @ai-sdk/google@1.2.10 does not emit it, so multi-step
+            // tool calls fail on the second-step request. flash-lite is the
+            // non-thinking variant — multi-step tool calls work without the
+            // signature.
+            model = googleAI("models/gemini-3.1-flash-lite");
           } else {
             logInfo("Chat.onChatMessage", "Initializing OpenAI client");                  
               
