@@ -5,8 +5,8 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	// Make sure this is history-lab-chat-agent-3 for deployment and have the route uncommented
-  "name": "history-lab-chat-agent-2", // for testing
-  // "name": "history-lab-chat-agent-3", // for deployment
+  // "name": "history-lab-chat-agent-2", // for testing
+  "name": "history-lab-chat-agent-3", // for deployment
 	"main": "src/server/index.ts",
 	"compatibility_date": "2025-02-04",
 	"compatibility_flags": [
