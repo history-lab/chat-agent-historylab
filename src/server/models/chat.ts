@@ -139,6 +139,14 @@ export class Chat extends DurableObject<Env> {
         messages: modelMessages,
         tools,
         stopWhen: stepCountIs(10),
+        // Cap thinking to keep latency low between tool calls — Gemini 3.x
+        // models default to large thinking budgets which add multi-second
+        // pauses without visible benefit for this search-and-synthesize flow.
+        providerOptions: {
+          google: {
+            thinkingConfig: { thinkingBudget: 256 },
+          },
+        },
         onError: (error) => {
           logError("Chat.handleChatPost", "Error in AI stream", error);
         },
