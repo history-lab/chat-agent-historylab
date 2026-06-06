@@ -6,26 +6,8 @@ import { type Chat } from "./models/chat";
 export type Env = {
   OPENAI_API_KEY: string;
   GOOGLE_GENERATIVE_AI_API_KEY: string;
-  BUCKET: R2Bucket;
+  VECTOR_API_KEY: string;
   Chat: DurableObjectNamespace<Chat>;
-  VECTORIZE_SEARCH: {
-    findSimilarEmbeddings(
-      queries: string | string[],
-      collection_id: string,
-      topK?: number,
-      filters?: Record<string, any>
-    ): Promise<{
-      status: string;
-      matches?: Array<{
-        id: string;
-        text: string;
-        score: number;
-        metadata?: Record<string, any>;
-      }>;
-      message?: string;
-      error?: string;
-    }>;
-  };
   CONVERSATION_LOGS: KVNamespace;
   FEEDBACK_LOGS: KVNamespace;
 };

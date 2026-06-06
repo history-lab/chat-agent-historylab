@@ -1,5 +1,5 @@
 import React from 'react';
-import { RefreshCw, Check, AlertTriangle } from 'lucide-react';
+import { RefreshCw, Check, AlertTriangle, FileText } from 'lucide-react';
 import DocumentResults from '../documents/DocumentResults';
 import { formatDateRange } from '../../utils/formatting';
 
@@ -12,169 +12,185 @@ interface ToolInvocationProps {
   status: string;
 }
 
+const SEARCH_TOOLS = new Set([
+  'vectorSearch',
+  'corpusSearch',
+  'frusSearch',
+  'entityDocuments',
+  'browseTopics',
+]);
+
 const ToolInvocation: React.FC<ToolInvocationProps> = ({ part, messageId, index, conversationId, status }) => {
   const toolName: string = typeof part?.type === 'string' ? part.type.replace(/^tool-/, '') : '';
-  const toolCallId = part?.toolCallId;
   const partState = part?.state;
-  const input = part?.input;
+  const input = part?.input ?? {};
   const output = part?.output;
   const errorText = part?.errorText;
   const isComplete = partState === 'output-available';
   const isErrored = partState === 'output-error';
+  const isPending = !isComplete && !isErrored;
 
-  if (toolName === 'queryCollection') {
-    if (!isComplete && !isErrored) {
-      const queryText = input?.query || '...';
-      const dateRangeStr = formatDateRange(input);
-      const displayText = `"${queryText.length > 60 ? queryText.substring(0, 60) + '...' : queryText}" ${dateRangeStr}`.trim();
-      return (
-        <div
-          key={`${messageId}-tool-searching-${index}`}
-          className="bg-blue-50 p-3 my-3 border border-blue-200 rounded-md text-blue-700 flex items-center gap-2 shadow-sm"
-        >
-          <RefreshCw size={14} className="animate-spin text-blue-500" />
-          <span className="text-xs font-medium">
-            Searching archive for: <span className="italic">{displayText}</span>
-          </span>
-        </div>
-      );
-    }
-    if (isErrored) {
-      return (
-        <div
-          key={`${messageId}-tool-error-${index}`}
-          className="bg-red-50 p-3 my-3 border border-red-300 rounded-md text-red-700 flex items-center gap-2 shadow-sm"
-        >
-          <AlertTriangle size={14} className="text-red-500 flex-shrink-0" />
-          <span className="text-xs font-medium">Search failed: {errorText || 'unknown error'}</span>
-        </div>
-      );
-    }
-    if (output && typeof output === 'object') {
-      return (
-        <div key={`${messageId}-tool-results-${index}`} className="my-3">
-          <DocumentResults
-            resultData={output}
-            chatStatus={status}
-            conversationId={conversationId}
-          />
-        </div>
-      );
-    }
+  // ── In-progress spinner ───────────────────────────────────────
+  if (isPending) {
+    const queryText = input?.query || input?.title || input?.from || input?.to || input?.corpus || input?.type || '';
+    const dateRangeStr = formatDateRange(input);
+    const label = queryText
+      ? `${toolName}: "${queryText.length > 60 ? queryText.substring(0, 60) + '...' : queryText}" ${dateRangeStr}`.trim()
+      : toolName;
     return (
       <div
-        key={`${messageId}-tool-unknown-${index}`}
-        className="bg-gray-50 p-3 my-3 border border-gray-200 rounded-md text-gray-500 flex items-center gap-2 shadow-sm"
+        key={`${messageId}-tool-pending-${index}`}
+        className="bg-blue-50 p-3 my-3 border border-blue-200 rounded-md text-blue-700 flex items-center gap-2 shadow-sm"
       >
-        <AlertTriangle size={14} className="text-gray-400 flex-shrink-0" />
-        <span className="text-xs font-medium italic">Received unexpected search result format.</span>
+        <RefreshCw size={14} className="animate-spin text-blue-500" />
+        <span className="text-xs font-medium">
+          Running <span className="italic">{label}</span>
+        </span>
       </div>
     );
   }
 
-  if (toolName === 'getDocumentText') {
-    const r2Key = input?.r2Key || 'unknown document';
-    const r2KeySnippet = r2Key.length > 40 ? `...${r2Key.substring(r2Key.length - 40)}` : r2Key;
-
-    if (!isComplete && !isErrored) {
-      return (
-        <div
-          key={`${messageId}-tool-fetching-${index}`}
-          className="bg-blue-50 p-3 my-3 border border-blue-200 rounded-md text-blue-700 flex items-center gap-2 shadow-sm"
-        >
-          <RefreshCw size={14} className="animate-spin text-blue-500" />
-          <span className="text-xs font-medium">
-            Fetching text for document: <span className="font-mono text-[10px] bg-blue-100 px-1 rounded">{r2KeySnippet}</span>...
-          </span>
-        </div>
-      );
-    }
-
-    const hasError = isErrored || (typeof output === 'object' && output !== null && output.error);
-    const errorMessage = isErrored ? errorText : (output?.error ?? 'Unknown error');
-    if (hasError) {
-      return (
-        <div
-          key={`${messageId}-tool-error-${index}`}
-          className="bg-red-50 p-3 my-3 border border-red-300 rounded-md text-red-700 flex items-center gap-2 shadow-sm"
-        >
-          <AlertTriangle size={14} className="text-red-500 flex-shrink-0" />
-          <span className="text-xs font-medium">
-            Error fetching <span className="font-mono text-[10px] bg-red-100 px-1 rounded">{r2KeySnippet}</span>: {errorMessage}
-          </span>
-        </div>
-      );
-    }
+  // ── Error ─────────────────────────────────────────────────────
+  if (isErrored || (typeof output === 'object' && output !== null && output.error)) {
+    const msg = errorText || output?.error || 'Tool failed.';
     return (
       <div
-        key={`${messageId}-tool-success-${index}`}
+        key={`${messageId}-tool-error-${index}`}
+        className="bg-red-50 p-3 my-3 border border-red-300 rounded-md text-red-700 flex items-center gap-2 shadow-sm"
+      >
+        <AlertTriangle size={14} className="text-red-500 flex-shrink-0" />
+        <span className="text-xs font-medium">
+          {toolName} failed: {msg}
+        </span>
+      </div>
+    );
+  }
+
+  // ── Specialised rendering ─────────────────────────────────────
+
+  // vectorSearch returns { documents: [...] } with file_info.r2Key + chunks
+  if (toolName === 'vectorSearch' && output && Array.isArray(output.documents)) {
+    return (
+      <div key={`${messageId}-tool-results-${index}`} className="my-3">
+        <DocumentResults
+          resultData={output}
+          chatStatus={status}
+          conversationId={conversationId}
+        />
+      </div>
+    );
+  }
+
+  // corpusSearch / frusSearch / entityDocuments / browseTopics return { data: [...], total }
+  if (SEARCH_TOOLS.has(toolName) && output && Array.isArray(output.data)) {
+    const rows = output.data as any[];
+    const total = output.total;
+    const headline = total != null && total > rows.length
+      ? `${toolName}: ${rows.length} shown · ${total} total`
+      : `${toolName}: ${rows.length} result${rows.length === 1 ? '' : 's'}`;
+    return (
+      <div
+        key={`${messageId}-tool-results-${index}`}
+        className="bg-blue-50 p-3 my-3 border border-blue-200 rounded-md shadow-sm"
+      >
+        <div className="flex items-center gap-2 mb-2">
+          <FileText size={14} className="text-blue-600 flex-shrink-0" />
+          <span className="text-xs font-medium text-blue-800">{headline}</span>
+        </div>
+        {rows.length > 0 && (
+          <ul className="text-xs text-blue-900 space-y-1 ml-1">
+            {rows.slice(0, 8).map((row: any, i: number) => (
+              <li key={row.doc_id ?? row.entity_id ?? i} className="truncate">
+                {row.title || row.entity || row.doc_id || JSON.stringify(row).slice(0, 80)}
+                {row.authored ? ` · ${row.authored.toString().slice(0, 10)}` : ''}
+              </li>
+            ))}
+            {rows.length > 8 && (
+              <li className="text-[10px] text-blue-700 italic">+ {rows.length - 8} more</li>
+            )}
+          </ul>
+        )}
+      </div>
+    );
+  }
+
+  // entityLookup returns { data: [{entity, doc_cnt, ...}], total }
+  if (toolName === 'entityLookup' && output && Array.isArray(output.data)) {
+    const entities = output.data as any[];
+    return (
+      <div
+        key={`${messageId}-tool-results-${index}`}
+        className="bg-blue-50 p-3 my-3 border border-blue-200 rounded-md shadow-sm"
+      >
+        <div className="text-xs font-medium text-blue-800 mb-2">
+          entityLookup: {entities.length} match{entities.length === 1 ? '' : 'es'}
+        </div>
+        <ul className="text-xs text-blue-900 space-y-1 ml-1">
+          {entities.slice(0, 10).map((e: any, i: number) => (
+            <li key={e.entity_id ?? i}>
+              <span className="font-medium">{e.entity}</span>
+              <span className="text-blue-700"> · {e.entity_group} · {e.doc_cnt} docs</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+
+  // getDocument returns a single doc object with title/body/doc_id
+  if (toolName === 'getDocument' && output && (output.doc_id || output.title)) {
+    return (
+      <div
+        key={`${messageId}-tool-doc-${index}`}
         className="bg-blue-50 p-3 my-3 border border-blue-200 rounded-md text-blue-700 flex items-center gap-2 shadow-sm"
       >
         <Check size={14} className="text-blue-500 flex-shrink-0" />
-        <span className="text-xs font-medium">Document text retrieved.</span>
+        <span className="text-xs font-medium">
+          Loaded <span className="italic">{output.title || output.doc_id}</span>
+        </span>
       </div>
     );
   }
 
+  // submitFeedback success
   if (toolName === 'submitFeedback') {
-    if (!isComplete && !isErrored) {
+    if (output?.success === false) {
       return (
         <div
-          key={`${messageId}-tool-feedback-${index}`}
-          className="bg-blue-50 p-3 my-3 border border-blue-200 rounded-md text-blue-700 flex items-center gap-2 shadow-sm"
-        >
-          <RefreshCw size={14} className="animate-spin text-blue-500" />
-          <span className="text-xs font-medium">Submitting feedback…</span>
-        </div>
-      );
-    }
-    if (isErrored) {
-      return (
-        <div
-          key={`${messageId}-tool-feedback-error-${index}`}
+          key={`${messageId}-tool-fb-err-${index}`}
           className="bg-red-50 p-3 my-3 border border-red-300 rounded-md text-red-700 flex items-center gap-2 shadow-sm"
         >
           <AlertTriangle size={14} className="text-red-500 flex-shrink-0" />
-          <span className="text-xs font-medium">{errorText || 'Feedback submission failed.'}</span>
-        </div>
-      );
-    }
-    const isFailed = typeof output === 'object' && output !== null && output.success === false;
-    if (isFailed) {
-      return (
-        <div
-          key={`${messageId}-tool-feedback-error-${index}`}
-          className="bg-red-50 p-3 my-3 border border-red-300 rounded-md text-red-700 flex items-center gap-2 shadow-sm"
-        >
-          <AlertTriangle size={14} className="text-red-500 flex-shrink-0" />
-          <span className="text-xs font-medium">{output.error || 'Failed to submit feedback.'}</span>
+          <span className="text-xs font-medium">{output?.error || 'Feedback submission failed.'}</span>
         </div>
       );
     }
     return (
       <div
-        key={`${messageId}-tool-feedback-success-${index}`}
+        key={`${messageId}-tool-fb-${index}`}
         className="bg-blue-50 p-3 my-3 border border-blue-200 rounded-md text-blue-700 flex items-center gap-2 shadow-sm"
       >
         <Check size={14} className="text-blue-500 flex-shrink-0" />
-        <span className="text-xs font-medium">Feedback submitted successfully.</span>
+        <span className="text-xs font-medium">Feedback submitted.</span>
       </div>
     );
   }
 
-  if (isComplete) {
-    return (
-      <div
-        key={`${messageId}-tool-generic-result-${index}`}
-        className="bg-gray-100 p-3 my-3 border border-gray-300 rounded-md text-gray-700 text-xs shadow-sm"
-      >
-        <span className="font-semibold">Tool Result ({toolName}):</span>
-        <pre className="mt-1 text-[10px] overflow-auto">{JSON.stringify(output, null, 2)}</pre>
+  // ── Generic fallback (listCorpora, archiveStats, anything new) ─
+  return (
+    <div
+      key={`${messageId}-tool-generic-${index}`}
+      className="bg-gray-100 p-3 my-3 border border-gray-300 rounded-md text-gray-700 text-xs shadow-sm"
+    >
+      <div className="flex items-center gap-2 mb-1">
+        <FileText size={14} className="text-gray-500 flex-shrink-0" />
+        <span className="font-semibold">{toolName}</span>
       </div>
-    );
-  }
-
-  return null;
+      <pre className="text-[10px] overflow-auto max-h-48 whitespace-pre-wrap break-words text-gray-700">
+        {JSON.stringify(output, null, 2)}
+      </pre>
+    </div>
+  );
 };
 
 export default ToolInvocation;

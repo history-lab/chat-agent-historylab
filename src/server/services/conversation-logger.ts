@@ -265,16 +265,22 @@ export class ConversationLogger {
     const lastUserMessageIndex = messages.length - 2; // Last user message before the assistant response
     const lastUserMessage = messages[lastUserMessageIndex];
     
-    // Extract query details from message parts.
-    // v6 represents tool invocations as discriminated parts with `type: \`tool-${toolName}\``,
-    // `state`, `input`, and `output` fields.
+    // v6 tool parts: `type: \`tool-${name}\``, `state`, `input`, `output`.
+    // Capture details for any search-style tool that ran.
+    const SEARCH_TOOL_PARTS = new Set([
+      "tool-vectorSearch",
+      "tool-corpusSearch",
+      "tool-frusSearch",
+      "tool-entityDocuments",
+    ]);
     if (lastAssistantMessage && Array.isArray(lastAssistantMessage.parts)) {
       lastAssistantMessage.parts.forEach((part: any) => {
-        if (part?.type !== "tool-queryCollection") return;
+        if (!SEARCH_TOOL_PARTS.has(part?.type)) return;
         if (part.state !== "output-available") {
           logDebug("ConversationLogger.extractQueryDetails", "Skipping tool part without output", {
             toolCallId: part.toolCallId,
             state: part.state,
+            type: part.type,
           });
           return;
         }
@@ -283,7 +289,7 @@ export class ConversationLogger {
         const queryDetail: ConversationLog['queries']['details'][number] = {
           toolCallId: part.toolCallId || '',
           timestamp: new Date().toISOString(),
-          query: args.query || '',
+          query: args.query || args.title || args.from || args.to || '',
           userMessageIndex: lastUserMessageIndex,
           userMessageId: lastUserMessage?.id || '',
           dateFilters: {
@@ -295,12 +301,33 @@ export class ConversationLogger {
           documentResults: [],
         };
 
-        if ((result.status === "success" || result.status === "partial_success") && Array.isArray(result.documents)) {
+        // vectorSearch returns { documents: [{ file_info, chunks, best_score }] }
+        if (Array.isArray(result.documents)) {
           queryDetail.documentResults = this.extractDocumentResults(result.documents);
-        } else if (result.status && result.status !== "success") {
-          logInfo("ConversationLogger.extractQueryDetails", "Query Collection tool did not succeed", {
+        }
+        // corpus/frus/entity tools return { data: [{ doc_id, title, authored }] }
+        if (Array.isArray(result.data)) {
+          queryDetail.documentResults = [
+            ...(queryDetail.documentResults || []),
+            ...result.data.map((row: any) => ({
+              doc_id: row.doc_id || '',
+              best_score: 0,
+              chunk_ids: [],
+              file_id: '',
+              file_r2key: '',
+              metadata: {
+                title: row.title || '',
+                authored_date: row.authored || '',
+                classification: row.classification || '',
+              },
+            })),
+          ];
+        }
+        if (result.error) {
+          logInfo("ConversationLogger.extractQueryDetails", "Tool returned error", {
             toolCallId: part.toolCallId,
-            status: result.status,
+            type: part.type,
+            error: result.error,
           });
         }
 

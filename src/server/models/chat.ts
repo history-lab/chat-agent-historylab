@@ -33,16 +33,12 @@ export class Chat extends DurableObject<Env> {
     this.conversationLogger = new ConversationLogger(env.CONVERSATION_LOGS);
   }
 
-  public getBucket() {
-    return this.env.BUCKET;
-  }
-
-  public getVectorizeSearch() {
-    return this.env.VECTORIZE_SEARCH;
-  }
-
   public getFeedbackKV() {
     return this.env.FEEDBACK_LOGS;
+  }
+
+  public getVectorApiKey(): string {
+    return this.env.VECTOR_API_KEY;
   }
 
   // Stored messages (for export, feedback hook).

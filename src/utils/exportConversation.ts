@@ -75,7 +75,7 @@ export function exportConversation(
             let metadata: Record<string, any> = {};
             if (message.parts) {
               for (const part of message.parts as any[]) {
-                if (part?.type === 'tool-queryCollection' && part.state === 'output-available' && part.output?.documents) {
+                if (part?.type === 'tool-vectorSearch' && part.state === 'output-available' && part.output?.documents) {
                   const foundDoc = (part.output.documents || []).find(
                     (doc: any) => doc.file_info?.r2Key === r2Key,
                   );
@@ -99,7 +99,7 @@ export function exportConversation(
       // Include tool invocations if present
       if (message.parts) {
         (message.parts as any[]).forEach((part) => {
-          if (part?.type === 'tool-queryCollection' && part.state === 'output-available') {
+          if (part?.type === 'tool-vectorSearch' && part.state === 'output-available') {
             const result = part.output;
             if (result) {
               if (result.status === 'success' || result.status === 'partial_success') {

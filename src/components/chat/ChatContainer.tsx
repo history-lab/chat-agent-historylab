@@ -7,7 +7,7 @@ import ChatHeader from './ChatHeader';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
 import ExampleQueries from './ExampleQueries';
-import { useDocumentRegistry } from '../documents/DocumentRegistry';
+import { useDocumentRegistry, getDocumentViewerUrl } from '../documents/DocumentRegistry';
 import { useConversation } from '../../hooks/useConversation';
 import { useFeedback } from '../../hooks/useFeedback';
 import { useAuth } from '../../hooks/useAuth';
@@ -263,9 +263,9 @@ const ChatContainer: React.FC = () => {
     const handleGlobalCitationClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       if (target.classList.contains('citation')) {
-        const r2Key = target.getAttribute('data-r2key');
-        if (r2Key) {
-          window.open(`https://doc-viewer.ramus.network/${r2Key}`, '_blank');
+        const identifier = target.getAttribute('data-r2key');
+        if (identifier) {
+          window.open(getDocumentViewerUrl(identifier), '_blank');
         }
       }
     };
@@ -273,23 +273,48 @@ const ChatContainer: React.FC = () => {
     return () => document.removeEventListener('click', handleGlobalCitationClick);
   }, []);
 
-  // Process all messages to extract and register documents from queryCollection results.
-  // v6 tool parts use `type: \`tool-${name}\``, `state: 'output-available'`, and `output`.
+  // Register documents from any tool that returns them. v6 tool parts are
+  // `type: \`tool-${name}\``, `state: 'output-available'`, `input`/`output`.
+  // Different tools return different shapes:
+  //   vectorSearch  → output.documents[] with file_info.r2Key
+  //   corpusSearch  → output.data[] with doc_id
+  //   frusSearch    → output.data[] with doc_id
+  //   entityDocuments / browseTopics → output.data[] with doc_id
   useEffect(() => {
     if (!messages || messages.length === 0) return;
     messages.forEach((message: any) => {
       if (message.role !== 'assistant' || !Array.isArray(message.parts)) return;
       message.parts.forEach((part: any) => {
-        if (part?.type !== 'tool-queryCollection') return;
+        if (typeof part?.type !== 'string' || !part.type.startsWith('tool-')) return;
         if (part.state !== 'output-available') return;
         const result = part.output;
-        if (!result || !Array.isArray(result.documents)) return;
-        result.documents.forEach((doc: any) => {
-          if (doc.file_info?.r2Key) {
-            const title = doc.file_info?.metadata?.title || doc.document_id || `Document`;
-            documentRegistry.registerDocument(doc.file_info.r2Key, title);
-          }
-        });
+        if (!result || typeof result !== 'object') return;
+
+        // vectorSearch: documents[] with file_info.r2Key
+        if (Array.isArray(result.documents)) {
+          result.documents.forEach((doc: any) => {
+            const r2Key = doc.file_info?.r2Key;
+            if (r2Key) {
+              const title = doc.file_info?.metadata?.title || doc.document_id || `Document`;
+              documentRegistry.registerDocument(r2Key, title);
+            }
+          });
+        }
+
+        // corpus / frus / entity / topic tools: data[] with doc_id
+        if (Array.isArray(result.data)) {
+          result.data.forEach((row: any) => {
+            const docId = row?.doc_id;
+            if (docId) {
+              documentRegistry.registerDocument(docId, row.title || docId);
+            }
+          });
+        }
+
+        // getDocument single result with doc_id
+        if (result.doc_id) {
+          documentRegistry.registerDocument(result.doc_id, result.title || result.doc_id);
+        }
       });
     });
   }, [messages, documentRegistry]);

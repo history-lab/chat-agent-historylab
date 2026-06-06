@@ -6,10 +6,10 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	// Make sure this is history-lab-chat-agent-3 for deployment and have the route uncommented
   // "name": "history-lab-chat-agent-2", // for testing
-  // "name": "history-lab-chat-agent-3", // older worker — bound to history-lab.ramus.network
+  "name": "history-lab-chat-agent-3", // test target for new-tools migration
   // "name": "history-lab-chat-agent-4", // older worker — no custom domain
   // "name": "history-lab-chat-agent-staging", // staging — for smoke-testing
-  "name": "history-lab-chat-agent-production", // CURRENT prod — history-lab-ai.declassification-engine.org
+  // "name": "history-lab-chat-agent-production", // CURRENT prod — history-lab-ai.declassification-engine.org
 	"main": "src/server/index.ts",
 	"compatibility_date": "2025-02-04",
 	"compatibility_flags": [
@@ -37,19 +37,6 @@
 	"observability": {
 		"enabled": true
 	},
-	"r2_buckets": [
-    {
-      "binding": "BUCKET",
-      "bucket_name": "ramus-files",
-      "preview_bucket_name": "ramus-files-preview"
-    }
-  ],
-  "services": [
-    { 
-        "binding": "VECTORIZE_SEARCH", // what you call it in the code
-        "service": "vector-search-worker-3" // the actual worker name        
-    }
-  ],
   "kv_namespaces": [
     {
       "binding": "CONVERSATION_LOGS",
@@ -66,18 +53,6 @@
       // "preview_id": "84e1177667614f4793158bbc708a9ce2" 
     }
   ]
-  // ,
-  // "ai": {
-  //   "binding": "AI"    
-  // }
-  ,
-  // // this should be uncommented for deployment
-  // "routes": [
-  //   {
-  //     "pattern": "history-lab.ramus.network",
-  //     "custom_domain": true
-  //   }
-  // ]
   /**
    * Smart Placement
    * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

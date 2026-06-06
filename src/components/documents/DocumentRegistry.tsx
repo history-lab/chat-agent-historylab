@@ -1,16 +1,29 @@
 import { useMemo } from 'react';
 
 /**
- * Document registry for consistent citation numbering
- * Maintains a map of documents referenced in the conversation
+ * Pick the right document viewer URL for an identifier.
+ * R2 keys contain '/' (e.g. `0000000001/80650a98-.../file.txt`) → ramus doc-viewer.
+ * Flat doc IDs (e.g. `CIA-RDP78-06362A000200010013-9`) → FOIArchive streamlit viewer.
+ */
+export function getDocumentViewerUrl(identifier: string): string {
+  if (identifier.includes('/')) {
+    return `https://doc-viewer.ramus.network/${identifier}`;
+  }
+  return `https://foiarchive-search-docviewer.streamlit.app/?doc_id=${encodeURIComponent(identifier)}`;
+}
+
+/**
+ * Document registry for consistent citation numbering.
+ * Keys can be either r2Keys or doc_ids — they share a namespace because the
+ * model picks whichever the tool returned.
  */
 export interface DocumentRegistryType {
   documents: Map<string, { id: number, title: string }>;
   counter: number;
-  registerDocument: (r2Key: string, title?: string) => number;
-  getDocumentId: (r2Key: string) => number | null;
-  getDocumentUrl: (r2Key: string) => string;
-  getDocumentTitle: (r2Key: string) => string;
+  registerDocument: (identifier: string, title?: string) => number;
+  getDocumentId: (identifier: string) => number | null;
+  getDocumentUrl: (identifier: string) => string;
+  getDocumentTitle: (identifier: string) => string;
 }
 
 /**
@@ -23,53 +36,26 @@ export function useDocumentRegistry(): DocumentRegistryType {
       documents: new Map<string, { id: number, title: string }>(),
       counter: 0,
       
-      /**
-       * Register a document in the registry
-       * @param r2Key Document key
-       * @param title Optional document title
-       * @returns Document ID (numbering system for citations)
-       */
-      registerDocument(r2Key: string, title?: string): number {
-        // Check if document already registered
-        if (this.documents.has(r2Key)) {
-          return this.documents.get(r2Key)!.id;
+      registerDocument(identifier: string, title?: string): number {
+        if (this.documents.has(identifier)) {
+          return this.documents.get(identifier)!.id;
         }
-        
-        // Register new document
         const docId = ++this.counter;
-        this.documents.set(r2Key, { 
-          id: docId, 
-          title: title || `Document ${docId}` 
+        this.documents.set(identifier, {
+          id: docId,
+          title: title || `Document ${docId}`,
         });
         return docId;
       },
-      
-      /**
-       * Get document ID if registered
-       * @param r2Key Document key
-       * @returns Document ID or null if not registered
-       */
-      getDocumentId(r2Key: string): number | null {
-        return this.documents.has(r2Key) ? this.documents.get(r2Key)!.id : null;
+      getDocumentId(identifier: string): number | null {
+        return this.documents.has(identifier) ? this.documents.get(identifier)!.id : null;
       },
-      
-      /**
-       * Get document viewer URL
-       * @param r2Key Document key
-       * @returns Full URL to document viewer
-       */
-      getDocumentUrl(r2Key: string): string {
-        return `https://doc-viewer.ramus.network/${r2Key}`;
+      getDocumentUrl(identifier: string): string {
+        return getDocumentViewerUrl(identifier);
       },
-      
-      /**
-       * Get document title
-       * @param r2Key Document key
-       * @returns Document title or generic fallback
-       */
-      getDocumentTitle(r2Key: string): string {
-        return this.documents.has(r2Key) ? this.documents.get(r2Key)!.title : `Document`;
-      }
+      getDocumentTitle(identifier: string): string {
+        return this.documents.has(identifier) ? this.documents.get(identifier)!.title : `Document`;
+      },
     };
   }, []);
 }

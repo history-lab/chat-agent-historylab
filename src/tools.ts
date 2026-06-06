@@ -1,11 +1,16 @@
 // tools.ts
-// Tool definitions for the AI chat agent.
+// Tool definitions calling History Lab APIs directly over HTTP.
+// No Cloudflare R2 / Vectorize bindings required.
 
 import { tool } from "ai";
 import { z } from "zod";
 
 import { agentContext } from "./server";
 import { logDebug, logInfo, logError } from "./shared";
+
+const VECTOR_API_URL = "https://vector-search-worker.nchimicles.workers.dev";
+const CORPUS_API_URL = "https://api.foiarchive.org";
+const COLLECTION_ID = "80650a98-fe49-429a-afbd-9dde66e2d02b";
 
 function getAgent() {
   const agent = agentContext.getStore();
@@ -15,187 +20,392 @@ function getAgent() {
   return agent;
 }
 
-const getDocumentText = tool({
-  description: "get the text of a given document from the R2 bucket",
-  inputSchema: z.object({ r2Key: z.string() }),
-  execute: async ({ r2Key }) => {
-    logInfo("getDocumentText", `Getting document text for document: ${r2Key}`);
+function getVectorApiKey(): string {
+  const key = getAgent().getVectorApiKey();
+  if (!key) {
+    throw new Error("VECTOR_API_KEY secret is not configured");
+  }
+  return key;
+}
+
+async function vectorFetch(path: string, body?: any) {
+  const opts: RequestInit = {
+    headers: {
+      Authorization: `Bearer ${getVectorApiKey()}`,
+      "Content-Type": "application/json",
+    },
+  };
+  if (body) {
+    opts.method = "POST";
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(`${VECTOR_API_URL}${path}`, opts);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Vector API ${res.status}: ${text}`);
+  }
+  return res.json() as Promise<any>;
+}
+
+async function corpusFetch(
+  path: string,
+  params: Record<string, string> = {},
+): Promise<{ data: any; total?: number }> {
+  const url = new URL(`${CORPUS_API_URL}${path}`);
+  for (const [k, v] of Object.entries(params)) {
+    url.searchParams.append(k, v);
+  }
+  const res = await fetch(url.toString(), { headers: { Prefer: "count=exact" } });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Corpus API ${res.status}: ${text}`);
+  }
+  const data = await res.json();
+  const contentRange = res.headers.get("Content-Range");
+  const total = contentRange ? parseInt(contentRange.split("/")[1]) : undefined;
+  return { data, total };
+}
+
+function dateToNum(date: string): number {
+  return parseInt(date.replace(/-/g, ""), 10);
+}
+function dateToYM(date: string): number {
+  const [y, m] = date.split("-");
+  return parseInt(`${y}${m}`, 10);
+}
+
+// ─── Search Tools ───────────────────────────────────────────────
+
+const vectorSearch = tool({
+  description:
+    "Semantic search across ~5M declassified documents using natural language. Best for exploratory queries. For complex topics, make MULTIPLE separate calls with focused queries.",
+  inputSchema: z.object({
+    query: z.string().describe("Natural language search query - be specific with names, places, events"),
+    limit: z.number().min(1).max(100).default(10).describe("Number of results (default 10)"),
+    date_from: z.string().optional().describe("Start date filter (YYYY-MM-DD)"),
+    date_to: z.string().optional().describe("End date filter (YYYY-MM-DD)"),
+  }),
+  execute: async ({ query, limit, date_from, date_to }) => {
+    logInfo("vectorSearch", `Searching: "${query}"`, { limit, date_from, date_to });
     try {
-      const agent = getAgent();
-      const bucket = agent.getBucket();
-      const file = await bucket.get(r2Key);
-      if (!file) {
-        return { error: "File not found" };
+      const filters: Record<string, any> = {};
+      if (date_from || date_to) {
+        const useDayLevel = (date_from && date_from.length === 10) || (date_to && date_to.length === 10);
+        if (useDayLevel) {
+          filters.authored_year_month_day = {};
+          if (date_from) filters.authored_year_month_day.$gte = dateToNum(date_from);
+          if (date_to) filters.authored_year_month_day.$lte = dateToNum(date_to);
+        } else {
+          filters.authored_year_month = {};
+          if (date_from) filters.authored_year_month.$gte = dateToYM(date_from);
+          if (date_to) filters.authored_year_month.$lte = dateToYM(date_to);
+        }
       }
-      return await file.text();
-    } catch (error) {
-      logError("getDocumentText", "Error getting document text", error);
-      return { error: "Failed to get document text" };
+      const result = await vectorFetch("/api/search", {
+        queries: query,
+        collection_id: COLLECTION_ID,
+        topK: limit || 10,
+        ...(Object.keys(filters).length > 0 ? { filters } : {}),
+      });
+      logInfo("vectorSearch", `Returned ${result?.documents?.length || 0} results`);
+      return result;
+    } catch (error: any) {
+      logError("vectorSearch", "Search failed", error);
+      return { error: error.message };
     }
   },
 });
 
-const queryCollection = tool({
+const corpusSearch = tool({
   description:
-    "Perform semantic searches through historical document collections. For complex topics, make MULTIPLE separate tool calls with focused queries. Use narrow date ranges (e.g., ~5 years) when possible, as wider ranges increase error likelihood.",
+    "Full-text search with filters for corpus, classification level, and date ranges. Use when you need to search a specific collection (e.g., CIA, FRUS, cables) or filter by classification.",
   inputSchema: z.object({
-    query: z
-      .string()
-      .describe(
-        "The semantic search query text - make focused, specific queries rather than combining multiple topics",
-      ),
-    doc_id: z
+    query: z.string().describe("Full-text search query"),
+    title: z.string().optional().describe("Filter by document title (partial match)"),
+    corpus: z
       .string()
       .optional()
-      .describe("Filter by specific document ID when looking for more information within a document"),
-    authored_start_year_month: z
+      .describe("Collection: frus, cables, cia, clinton, briefing, cfpf, kissinger, nato, un, worldbank, cabinet, cpdoc"),
+    classification: z
       .string()
       .optional()
-      .describe(
-        "Start year and month for filtering documents (format: 'YYYY-MM' as string). Preferred for most searches as it's more efficient.",
-      ),
-    authored_end_year_month: z
-      .string()
-      .optional()
-      .describe(
-        "End year and month for filtering documents (format: 'YYYY-MM' as string). Preferred for most searches as it's more efficient.",
-      ),
-    authored_start_year_month_day: z
-      .string()
-      .optional()
-      .describe(
-        "Start date for filtering documents (format: 'YYYY-MM-DD' as string). Only use for highly specific date-sensitive searches.",
-      ),
-    authored_end_year_month_day: z
-      .string()
-      .optional()
-      .describe(
-        "End date for filtering documents (format: 'YYYY-MM-DD' as string). Only use for highly specific date-sensitive searches.",
-      ),
+      .describe("Classification level: top secret, secret, confidential, unclassified, etc."),
+    date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
+    date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
+    limit: z.number().min(1).max(100).default(25).describe("Number of results"),
+    offset: z.number().default(0).describe("Offset for pagination"),
   }),
-  execute: async ({
-    query,
-    doc_id,
-    authored_start_year_month,
-    authored_end_year_month,
-    authored_start_year_month_day,
-    authored_end_year_month_day,
-  }) => {
-    logInfo(
-      "queryCollection",
-      `Querying collection: history-lab-1 with query: ${query}` +
-        (doc_id ? `, doc_id: ${doc_id}` : "") +
-        (authored_start_year_month ? `, authored_year_month from: ${authored_start_year_month}` : "") +
-        (authored_end_year_month ? `, to: ${authored_end_year_month}` : "") +
-        (authored_start_year_month_day ? `, authored_year_month_day from: ${authored_start_year_month_day}` : "") +
-        (authored_end_year_month_day ? `, to: ${authored_end_year_month_day}` : ""),
-    );
-
+  execute: async ({ query, title, corpus, classification, date_from, date_to, limit, offset }) => {
+    logInfo("corpusSearch", `Searching corpus: "${query}"`, { corpus, classification, date_from, date_to });
     try {
-      const agent = getAgent();
-      const vectorizeSearch = agent.getVectorizeSearch();
+      const params: Record<string, string> = {
+        select: "doc_id,corpus,title,authored,classification,body",
+        order: "authored.desc.nullslast",
+        limit: String(limit || 25),
+        offset: String(offset || 0),
+      };
+      if (query) params["full_text"] = `plfts.${query.replace(/\s+/g, "+")}`;
+      if (title) params["title"] = `ilike.*${title}*`;
+      if (corpus) params["corpus"] = `eq.${corpus}`;
+      if (classification) params["classification"] = `eq.${classification}`;
+      if (date_from) params["authored"] = `gte.${date_from}`;
+      if (date_to) {
+        // PostgREST allows duplicate keys via URL.searchParams.append
+        if (params["authored"]) {
+          const existing = params["authored"];
+          delete params["authored"];
+          const url = new URL(`${CORPUS_API_URL}/docs`);
+          for (const [k, v] of Object.entries(params)) {
+            url.searchParams.append(k, v);
+          }
+          url.searchParams.append("authored", existing);
+          url.searchParams.append("authored", `lt.${date_to}`);
+          const res = await fetch(url.toString(), { headers: { Prefer: "count=exact" } });
+          if (!res.ok) throw new Error(`Corpus API ${res.status}: ${await res.text()}`);
+          const data: any = await res.json();
+          const contentRange = res.headers.get("Content-Range");
+          const total = contentRange ? parseInt(contentRange.split("/")[1]) : undefined;
+          logInfo("corpusSearch", `Returned ${data?.length || 0} results (total: ${total})`);
+          return { data, total };
+        } else {
+          params["authored"] = `lt.${date_to}`;
+        }
+      }
+      const result = await corpusFetch("/docs", params);
+      logInfo("corpusSearch", `Returned ${result.data?.length || 0} results (total: ${result.total})`);
+      return result;
+    } catch (error: any) {
+      logError("corpusSearch", "Search failed", error);
+      return { error: error.message };
+    }
+  },
+});
 
-      const k = 5;
-      const filters: Record<string, any> = {};
+const frusSearch = tool({
+  description:
+    "Search Foreign Relations of the United States (FRUS) diplomatic records. 312K documents from 1620-1989. Supports filtering by sender, recipient, and location.",
+  inputSchema: z.object({
+    query: z.string().optional().describe("Full-text search query"),
+    from: z.string().optional().describe("Sender name (e.g., 'Kissinger')"),
+    to: z.string().optional().describe("Recipient name (e.g., 'Nixon')"),
+    location: z.string().optional().describe("Location filter"),
+    date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
+    date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
+    limit: z.number().min(1).max(100).default(25).describe("Number of results"),
+    offset: z.number().default(0).describe("Offset for pagination"),
+  }),
+  execute: async ({ query, from, to, location, date_from, date_to, limit, offset }) => {
+    logInfo("frusSearch", "Searching FRUS", { query, from, to, location });
+    try {
+      const params: Record<string, string> = {
+        select: "doc_id,title,p_from,p_to,location,authored,classification",
+        order: "authored.desc.nullslast",
+        limit: String(limit || 25),
+        offset: String(offset || 0),
+      };
+      if (query) params["full_text"] = `plfts.${query.replace(/\s+/g, "+")}`;
+      if (from) params["p_from"] = `ilike.*${from}*`;
+      if (to) params["p_to"] = `ilike.*${to}*`;
+      if (location) params["location"] = `ilike.*${location}*`;
+      if (date_from) params["authored"] = `gte.${date_from}`;
+      if (date_to) {
+        if (params["authored"]) {
+          const existing = params["authored"];
+          delete params["authored"];
+          const url = new URL(`${CORPUS_API_URL}/docs_frus`);
+          for (const [k, v] of Object.entries(params)) {
+            url.searchParams.append(k, v);
+          }
+          url.searchParams.append("authored", existing);
+          url.searchParams.append("authored", `lt.${date_to}`);
+          const res = await fetch(url.toString(), { headers: { Prefer: "count=exact" } });
+          if (!res.ok) throw new Error(`Corpus API ${res.status}: ${await res.text()}`);
+          const data: any = await res.json();
+          const contentRange = res.headers.get("Content-Range");
+          const total = contentRange ? parseInt(contentRange.split("/")[1]) : undefined;
+          logInfo("frusSearch", `Returned ${data?.length || 0} results (total: ${total})`);
+          return { data, total };
+        } else {
+          params["authored"] = `lt.${date_to}`;
+        }
+      }
+      const result = await corpusFetch("/docs_frus", params);
+      logInfo("frusSearch", `Returned ${result.data?.length || 0} results (total: ${result.total})`);
+      return result;
+    } catch (error: any) {
+      logError("frusSearch", "Search failed", error);
+      return { error: error.message };
+    }
+  },
+});
+
+// ─── Document Tools ─────────────────────────────────────────────
+
+const getDocument = tool({
+  description: "Fetch the full text and metadata of a specific document by its document ID or R2 key.",
+  inputSchema: z.object({
+    doc_id: z.string().optional().describe("Document ID (e.g., 'CIA-RDP79T00429A001400010019-1')"),
+    r2_key: z.string().optional().describe("R2 storage key path for the document"),
+    enriched: z.boolean().default(false).describe("Include entities and topics if true"),
+  }),
+  execute: async ({ doc_id, r2_key, enriched }) => {
+    logInfo("getDocument", "Fetching document", { doc_id, r2_key, enriched });
+    try {
+      if (r2_key) {
+        return await vectorFetch(`/api/document/${r2_key}`);
+      }
       if (doc_id) {
-        filters.doc_id = doc_id;
+        const endpoint = enriched ? "/documents" : "/docs";
+        const params: Record<string, string> = { doc_id: `eq.${doc_id}` };
+        params.select = enriched
+          ? "doc_id,corpus,title,authored,classification,body,entities,topics"
+          : "doc_id,corpus,title,authored,classification,body";
+        const result = await corpusFetch(endpoint, params);
+        return result.data?.[0] || { error: "Document not found" };
       }
+      return { error: "Either doc_id or r2_key is required" };
+    } catch (error: any) {
+      logError("getDocument", "Fetch failed", error);
+      return { error: error.message };
+    }
+  },
+});
 
-      const convertYearMonthToNumber = (dateStr: string): number => {
-        const [year, month] = dateStr.split("-");
-        return parseInt(`${year}${month}`, 10);
+// ─── Entity Tools ───────────────────────────────────────────────
+
+const entityLookup = tool({
+  description:
+    "Look up named entities (people, places, organizations) mentioned in the archive. Returns entities with document counts.",
+  inputSchema: z.object({
+    query: z.string().describe("Entity name to search for (e.g., 'Castro', 'Saigon')"),
+    group: z.enum(["PERSON", "LOC", "ORG", "OTHER"]).optional().describe("Entity type filter"),
+    limit: z.number().min(1).max(100).default(25).describe("Number of results"),
+  }),
+  execute: async ({ query, group, limit }) => {
+    logInfo("entityLookup", `Looking up entity: "${query}"`, { group });
+    try {
+      const params: Record<string, string> = {
+        entity: `ilike.*${query}*`,
+        order: "doc_cnt.desc",
+        limit: String(limit || 25),
+        select: "entity_id,entity,entity_group,doc_cnt",
       };
-      const convertYearMonthDayToNumber = (dateStr: string): number => {
-        return parseInt(dateStr.replace(/-/g, ""), 10);
+      if (group) params["entity_group"] = `eq.${group}`;
+      const result = await corpusFetch("/entities", params);
+      logInfo("entityLookup", `Found ${result.data?.length || 0} entities`);
+      return result;
+    } catch (error: any) {
+      logError("entityLookup", "Lookup failed", error);
+      return { error: error.message };
+    }
+  },
+});
+
+const entityDocuments = tool({
+  description: "Get documents associated with a specific entity (by entity_id from entityLookup results).",
+  inputSchema: z.object({
+    entity_id: z.number().describe("Entity ID from entityLookup results"),
+    limit: z.number().min(1).max(100).default(25).describe("Number of results"),
+    offset: z.number().default(0).describe("Offset for pagination"),
+  }),
+  execute: async ({ entity_id, limit, offset }) => {
+    logInfo("entityDocuments", `Fetching docs for entity ${entity_id}`);
+    try {
+      const params: Record<string, string> = {
+        entity_id: `eq.${entity_id}`,
+        select: "doc_id,corpus,title,authored",
+        order: "authored.desc.nullslast",
+        limit: String(limit || 25),
+        offset: String(offset || 0),
       };
+      const result = await corpusFetch("/entity_docs", params);
+      logInfo("entityDocuments", `Found ${result.data?.length || 0} documents`);
+      return result;
+    } catch (error: any) {
+      logError("entityDocuments", "Fetch failed", error);
+      return { error: error.message };
+    }
+  },
+});
 
-      const hasYearMonthDayParams =
-        authored_start_year_month_day || authored_end_year_month_day;
+// ─── Browse & Stats Tools ───────────────────────────────────────
 
-      if (hasYearMonthDayParams) {
-        filters.authored_year_month_day = {};
-        if (
-          authored_start_year_month_day &&
-          authored_end_year_month_day &&
-          authored_start_year_month_day === authored_end_year_month_day
-        ) {
-          filters.authored_year_month_day.$eq = convertYearMonthDayToNumber(
-            authored_start_year_month_day,
-          );
-        } else {
-          if (authored_start_year_month_day) {
-            filters.authored_year_month_day.$gte = convertYearMonthDayToNumber(
-              authored_start_year_month_day,
-            );
-          }
-          if (authored_end_year_month_day) {
-            filters.authored_year_month_day.$lte = convertYearMonthDayToNumber(
-              authored_end_year_month_day,
-            );
-          }
-        }
-      } else if (authored_start_year_month || authored_end_year_month) {
-        filters.authored_year_month = {};
-        if (
-          authored_start_year_month &&
-          authored_end_year_month &&
-          authored_start_year_month === authored_end_year_month
-        ) {
-          filters.authored_year_month.$eq = convertYearMonthToNumber(
-            authored_start_year_month,
-          );
-        } else {
-          if (authored_start_year_month) {
-            filters.authored_year_month.$gte = convertYearMonthToNumber(
-              authored_start_year_month,
-            );
-          }
-          if (authored_end_year_month) {
-            filters.authored_year_month.$lte = convertYearMonthToNumber(
-              authored_end_year_month,
-            );
-          }
-        }
-      }
+const listCorpora = tool({
+  description: "List all available document collections with their statistics.",
+  inputSchema: z.object({}),
+  execute: async () => {
+    logInfo("listCorpora", "Fetching corpora list");
+    try {
+      return await corpusFetch("/corpora", { select: "*", order: "corpus" });
+    } catch (error: any) {
+      logError("listCorpora", "Fetch failed", error);
+      return { error: error.message };
+    }
+  },
+});
 
-      const finalCollectionId = "80650a98-fe49-429a-afbd-9dde66e2d02b"; // history-lab-1
-
-      logDebug(
-        "queryCollection",
-        `Search request: {queries: "${query}", collection_id: "${finalCollectionId}", topK: ${k}, filters: ${JSON.stringify(filters)}}`,
-      );
-
-      const results = await vectorizeSearch.findSimilarEmbeddings(
-        query,
-        finalCollectionId,
-        k,
-        Object.keys(filters).length > 0 ? filters : undefined,
-      );
-
-      if (results?.error) {
-        logError("queryCollection", "Error querying collection", results.error, {
-          query,
-          doc_id,
+const browseTopics = tool({
+  description: "Explore LDA topic models by corpus. Shows topic keywords and top documents.",
+  inputSchema: z.object({
+    corpus: z.string().describe("Corpus to browse topics for (e.g., 'cia', 'frus')"),
+    topic_id: z.number().optional().describe("Specific topic ID to get details and documents"),
+    limit: z.number().min(1).max(50).default(20).describe("Number of results"),
+  }),
+  execute: async ({ corpus, topic_id, limit }) => {
+    logInfo("browseTopics", `Browsing topics for ${corpus}`, { topic_id });
+    try {
+      if (topic_id !== undefined) {
+        return await corpusFetch("/topic_docs", {
+          topic_id: `eq.${topic_id}`,
+          select: "doc_id,corpus,title,authored,weight",
+          order: "weight.desc",
+          limit: String(limit || 20),
         });
       }
-      logInfo("queryCollection", `Search returned ${results?.matches?.length || 0} results`);
-      logDebug("queryCollection", `Results: ${JSON.stringify(results)}`);
-      return results;
-    } catch (error) {
-      logError("queryCollection", "Error querying collection", error, { query, doc_id });
-      return { error: "Failed to query collection" };
+      return await corpusFetch("/topics", {
+        corpus: `eq.${corpus}`,
+        select: "topic_id,corpus,words,word_weights",
+        order: "topic_id",
+        limit: String(limit || 20),
+      });
+    } catch (error: any) {
+      logError("browseTopics", "Fetch failed", error);
+      return { error: error.message };
     }
   },
 });
+
+const archiveStats = tool({
+  description: "Get aggregate statistics about the archive: total documents, breakdown by decade, or classification levels.",
+  inputSchema: z.object({
+    type: z.enum(["totals", "decades", "classifications"]).default("totals").describe("Type of statistics"),
+  }),
+  execute: async ({ type }) => {
+    logInfo("archiveStats", `Fetching stats: ${type}`);
+    try {
+      const endpoints: Record<string, string> = {
+        totals: "/totals",
+        decades: "/totals_decade",
+        classifications: "/classifications",
+      };
+      return await corpusFetch(endpoints[type] || "/totals", { select: "*" });
+    } catch (error: any) {
+      logError("archiveStats", "Fetch failed", error);
+      return { error: error.message };
+    }
+  },
+});
+
+// ─── Feedback Tool ──────────────────────────────────────────────
 
 const submitFeedback = tool({
   description:
-    "Submit a feedback report for technical issues or user feedback about the service. Use when the user reports a tool failure, unexpected empty results, or expresses frustration. The tool captures the conversation context automatically.",
+    "Submit a feedback report for technical issues or user feedback about the service. Use when the user reports a tool failure or expresses frustration. Captures conversation context automatically.",
   inputSchema: z.object({
     description: z
       .string()
       .describe(
-        "Detailed description: (1) the specific issue or feedback, (2) what the user was trying to accomplish, (3) impact on their research.",
+        "Detailed description: (1) specific issue, (2) what the user was trying to accomplish, (3) impact on their research.",
       ),
   }),
   execute: async ({ description }) => {
@@ -205,7 +415,6 @@ const submitFeedback = tool({
       const feedbackKV = agent.getFeedbackKV();
       const messages = agent.messages;
       const agentName = agent.name || "unknown-agent";
-
       const filteredConversation = filterConversationForFeedback(messages);
 
       let userId = "unknown";
@@ -213,42 +422,50 @@ const submitFeedback = tool({
       let convoId = "unknown";
       try {
         const decoded = Buffer.from(agentName, "base64").toString("utf-8").split("|");
-        if (decoded.length === 3) {
-          [userId, collectionId, convoId] = decoded;
-        }
+        if (decoded.length === 3) [userId, collectionId, convoId] = decoded;
       } catch (error) {
-        logError("submitFeedback", "Failed to decode agent name", error, { agentName });
+        logError("submitFeedback", "Failed to decode agent name", error);
       }
 
       const reportId = `feedback-${userId}-${convoId}-${Date.now()}`;
-      const feedbackData = {
+      await feedbackKV.put(
         reportId,
-        timestamp: new Date().toISOString(),
-        userId,
-        collectionId,
-        convoId,
-        description,
-        conversation: filteredConversation,
-      };
-      await feedbackKV.put(reportId, JSON.stringify(feedbackData));
-      logInfo("submitFeedback", `Successfully saved feedback report: ${reportId}`);
-      return {
-        success: true,
-        reportId,
-        message: "Thank you for your feedback. A report has been submitted.",
-      };
-    } catch (error) {
-      logError("submitFeedback", "Error submitting feedback", error, { description });
+        JSON.stringify({
+          reportId,
+          timestamp: new Date().toISOString(),
+          userId,
+          collectionId,
+          convoId,
+          description,
+          conversation: filteredConversation,
+        }),
+      );
+
+      logInfo("submitFeedback", `Saved feedback: ${reportId}`);
+      return { success: true, reportId, message: "Thank you for your feedback. A report has been submitted." };
+    } catch (error: any) {
+      logError("submitFeedback", "Error submitting feedback", error);
       return { success: false, error: "Failed to submit feedback due to an internal error." };
     }
   },
 });
 
+// ─── Exports ────────────────────────────────────────────────────
+
 export const tools = {
-  queryCollection,
-  getDocumentText,
+  vectorSearch,
+  corpusSearch,
+  frusSearch,
+  getDocument,
+  entityLookup,
+  entityDocuments,
+  listCorpora,
+  browseTopics,
+  archiveStats,
   submitFeedback,
 };
+
+// ─── Helpers ────────────────────────────────────────────────────
 
 function truncateLargeStrings(data: any, maxLength: number): any {
   if (typeof data === "string") {
@@ -269,7 +486,6 @@ function truncateLargeStrings(data: any, maxLength: number): any {
   return data;
 }
 
-// Reduce tool result payloads embedded in messages before persisting them to KV.
 function filterConversationForFeedback(messages: any[]) {
   return messages.map((message) => {
     const copy = JSON.parse(JSON.stringify(message));
