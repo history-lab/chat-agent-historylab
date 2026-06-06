@@ -205,7 +205,10 @@ const frusSearch = tool({
         limit: String(limit || 25),
         offset: String(offset || 0),
       };
-      if (query) params["full_text"] = `plfts.${query.replace(/\s+/g, "+")}`;
+      // docs_frus's full-text-indexed column is `body` (the docs table uses
+      // `full_text`). docs_frus.body is the HTML version; we still drop it
+      // from select to keep responses small.
+      if (query) params["body"] = `plfts.${query.replace(/\s+/g, "+")}`;
       if (from) params["p_from"] = `ilike.*${from}*`;
       if (to) params["p_to"] = `ilike.*${to}*`;
       if (location) params["location"] = `ilike.*${location}*`;
