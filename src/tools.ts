@@ -138,8 +138,10 @@ const corpusSearch = tool({
   execute: async ({ query, title, corpus, classification, date_from, date_to, limit, offset }) => {
     logInfo("corpusSearch", `Searching corpus: "${query}"`, { corpus, classification, date_from, date_to });
     try {
+      // Metadata only — bodies are huge and blow past the model context.
+      // The agent can call `getDocument(doc_id)` for any row it wants in full.
       const params: Record<string, string> = {
-        select: "doc_id,corpus,title,authored,classification,body",
+        select: "doc_id,corpus,title,authored,classification",
         order: "authored.desc.nullslast",
         limit: String(limit || 25),
         offset: String(offset || 0),
@@ -284,13 +286,14 @@ const entityLookup = tool({
   execute: async ({ query, group, limit }) => {
     logInfo("entityLookup", `Looking up entity: "${query}"`, { group });
     try {
+      // PostgREST column is `entgroup` (not `entity_group`).
       const params: Record<string, string> = {
         entity: `ilike.*${query}*`,
         order: "doc_cnt.desc",
         limit: String(limit || 25),
-        select: "entity_id,entity,entity_group,doc_cnt",
+        select: "entity_id,entity,entgroup,doc_cnt",
       };
-      if (group) params["entity_group"] = `eq.${group}`;
+      if (group) params["entgroup"] = `eq.${group}`;
       const result = await corpusFetch("/entities", params);
       logInfo("entityLookup", `Found ${result.data?.length || 0} entities`);
       return result;
@@ -311,14 +314,24 @@ const entityDocuments = tool({
   execute: async ({ entity_id, limit, offset }) => {
     logInfo("entityDocuments", `Fetching docs for entity ${entity_id}`);
     try {
+      // entity_docs only has entity_docs_id/entity_id/doc_id; embed `docs(...)`
+      // to pull title/authored/corpus from the parent table.
       const params: Record<string, string> = {
         entity_id: `eq.${entity_id}`,
-        select: "doc_id,corpus,title,authored",
-        order: "authored.desc.nullslast",
+        select: "doc_id,docs(corpus,title,authored)",
         limit: String(limit || 25),
         offset: String(offset || 0),
       };
       const result = await corpusFetch("/entity_docs", params);
+      // Flatten embed so downstream consumers see flat rows.
+      if (Array.isArray(result.data)) {
+        result.data = result.data.map((r: any) => ({
+          doc_id: r.doc_id,
+          corpus: r.docs?.corpus,
+          title: r.docs?.title,
+          authored: r.docs?.authored,
+        }));
+      }
       logInfo("entityDocuments", `Found ${result.data?.length || 0} documents`);
       return result;
     } catch (error: any) {
@@ -355,16 +368,29 @@ const browseTopics = tool({
     logInfo("browseTopics", `Browsing topics for ${corpus}`, { topic_id });
     try {
       if (topic_id !== undefined) {
-        return await corpusFetch("/topic_docs", {
+        // topic_docs columns: corpus, topic_id, doc_id, score. Embed `docs(...)`
+        // for title/authored, then flatten.
+        const result = await corpusFetch("/topic_docs", {
           topic_id: `eq.${topic_id}`,
-          select: "doc_id,corpus,title,authored,weight",
-          order: "weight.desc",
+          select: "doc_id,corpus,score,docs(title,authored)",
+          order: "score.desc",
           limit: String(limit || 20),
         });
+        if (Array.isArray(result.data)) {
+          result.data = result.data.map((r: any) => ({
+            doc_id: r.doc_id,
+            corpus: r.corpus,
+            score: r.score,
+            title: r.docs?.title,
+            authored: r.docs?.authored,
+          }));
+        }
+        return result;
       }
+      // topics columns: corpus, topic_id, title (3-word label), name (5-word label).
       return await corpusFetch("/topics", {
         corpus: `eq.${corpus}`,
-        select: "topic_id,corpus,words,word_weights",
+        select: "topic_id,corpus,title,name",
         order: "topic_id",
         limit: String(limit || 20),
       });
