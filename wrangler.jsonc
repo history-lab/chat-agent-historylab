@@ -6,10 +6,10 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	// Make sure this is history-lab-chat-agent-3 for deployment and have the route uncommented
   // "name": "history-lab-chat-agent-2", // for testing
-  "name": "history-lab-chat-agent-3", // test target for new-tools migration
+  // "name": "history-lab-chat-agent-3", // test target — history-lab.ramus.network
   // "name": "history-lab-chat-agent-4", // older worker — no custom domain
   // "name": "history-lab-chat-agent-staging", // staging — for smoke-testing
-  // "name": "history-lab-chat-agent-production", // CURRENT prod — history-lab-ai.declassification-engine.org
+  "name": "history-lab-chat-agent-production", // CURRENT prod — history-lab-ai.declassification-engine.org
 	"main": "src/server/index.ts",
 	"compatibility_date": "2025-02-04",
 	"compatibility_flags": [
