@@ -6,6 +6,16 @@ export const COLLECTION_ID = "80650a98-fe49-429a-afbd-9dde66e2d02b"; // history-
 export const useGemini = true;
 
 /**
+ * Maximum number of output tokens the model may generate per response.
+ *
+ * Without this, the provider's default cap applied and truncated long research
+ * syntheses mid-sentence (finishReason: "length"). Thinking is already capped
+ * separately (thinkingConfig.thinkingBudget in chat.ts), so this budget is
+ * spent almost entirely on the visible answer. Set generously; raise if needed.
+ */
+export const MAX_OUTPUT_TOKENS = 32000;
+
+/**
  * System prompt for the AI model.
  *
  * Kept intentionally short. Tool descriptions live with the tool definitions

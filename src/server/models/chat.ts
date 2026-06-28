@@ -16,7 +16,7 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { logDebug, logInfo, logError } from "../../shared";
 import { type Env } from "../types";
 import { tools } from "../../tools";
-import { useGemini, getSystemPrompt } from "../config";
+import { useGemini, getSystemPrompt, MAX_OUTPUT_TOKENS } from "../config";
 import { decodeHashedComponents } from "../utils/hash-utils";
 import { ConversationLogger } from "../services/conversation-logger";
 
@@ -135,6 +135,7 @@ export class Chat extends DurableObject<Env> {
         messages: modelMessages,
         tools,
         stopWhen: stepCountIs(10),
+        maxOutputTokens: MAX_OUTPUT_TOKENS,
         // Cap thinking to keep latency low between tool calls — Gemini 3.x
         // models default to large thinking budgets which add multi-second
         // pauses without visible benefit for this search-and-synthesize flow.
