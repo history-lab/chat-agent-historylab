@@ -14,16 +14,20 @@ interface MessageContentProps {
  * Component for rendering message content with markdown and citation support
  */
 const MessageContent: React.FC<MessageContentProps> = ({ text, messageId, documentRegistry }) => {
-  // Process special citation codes: {{cite:r2Key}}
-  // Convert to custom span that will be parsed as HTML with rehypeRaw
-  const processedText = text.replace(
-    /{{cite:([^}]+)}}/g, 
-    (match, r2Key) => {
+  // Process special citation codes: {{cite:r2Key}} -> a <span> parsed as HTML
+  // by rehypeRaw. The model sometimes emits the marker on its own (often
+  // indented) line; Markdown then renders the resulting <span> as an indented
+  // code block. So first pull any line-leading citation back onto the previous
+  // line, and pull trailing punctuation that landed on the next line back up to
+  // the marker, keeping the citation inline before converting it to HTML.
+  const processedText = text
+    .replace(/[ \t]*[\r\n]+[ \t]*(\{\{cite:[^}]+\}\})/g, ' $1')
+    .replace(/(\{\{cite:[^}]+\}\})[ \t]*[\r\n]+[ \t]*([.,;:!?)])/g, '$1$2')
+    .replace(/\{\{cite:([^}]+)\}\}/g, (_match, r2Key) => {
       // Register document if not already registered
       const docId = documentRegistry.registerDocument(r2Key);
       return `<span class="citation" data-number="${docId}" data-r2key="${r2Key}" title="View source document ${docId}: ${documentRegistry.getDocumentTitle(r2Key)}">${docId}</span>`;
-    }
-  );
+    });
 
   return (
     <div className="whitespace-pre-wrap break-words text-gray-800 markdown-condensed">
