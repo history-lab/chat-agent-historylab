@@ -14,15 +14,13 @@ interface MessageContentProps {
  * Component for rendering message content with markdown and citation support
  */
 const MessageContent: React.FC<MessageContentProps> = ({ text, messageId, documentRegistry }) => {
-  // Process special citation codes: {{cite:r2Key}} -> a <span> parsed as HTML
-  // by rehypeRaw. The model sometimes emits the marker on its own (often
-  // indented) line; Markdown then renders the resulting <span> as an indented
-  // code block. So first pull any line-leading citation back onto the previous
-  // line, and pull trailing punctuation that landed on the next line back up to
-  // the marker, keeping the citation inline before converting it to HTML.
+  // Convert citation markers {{cite:r2Key}} into a <span> that rehypeRaw renders
+  // as a clickable footnote. The model frequently wraps the marker in backticks
+  // (it mirrors the formatting used to describe the marker), which would turn the
+  // injected <span> into inline code and surface the raw HTML. Strip any
+  // backticks hugging a marker before converting it.
   const processedText = text
-    .replace(/[ \t]*[\r\n]+[ \t]*(\{\{cite:[^}]+\}\})/g, ' $1')
-    .replace(/(\{\{cite:[^}]+\}\})[ \t]*[\r\n]+[ \t]*([.,;:!?)])/g, '$1$2')
+    .replace(/`+(\{\{cite:[^}]+\}\})`+/g, '$1')
     .replace(/\{\{cite:([^}]+)\}\}/g, (_match, r2Key) => {
       // Register document if not already registered
       const docId = documentRegistry.registerDocument(r2Key);

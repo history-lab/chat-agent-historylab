@@ -58,9 +58,13 @@ export function exportConversation(
       // Extract text content from assistant message
       const messageText = extractMessageText(message);
       
-      // Process citation markers to make them readable in exported markdown
-      // Replace {{cite:r2Key}} with clickable document links
-      const processedText = messageText.replace(
+      // Process citation markers to make them readable in exported markdown.
+      // Strip any backticks the model wrapped around the marker first (otherwise
+      // the link ends up inside inline code), then replace {{cite:r2Key}} with
+      // clickable document links.
+      const processedText = messageText
+        .replace(/`+(\{\{cite:[^}]+\}\})`+/g, '$1')
+        .replace(
         /{{cite:([^}]+)}}/g,
         (match, r2Key) => {
           const docId = documentRegistry.getDocumentId(r2Key) || '?';
